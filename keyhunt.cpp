@@ -35,6 +35,7 @@ email: albertobsd@gmail.com
 #include <pthread.h>
 #include <sys/random.h>
 #include <getopt.h>
+#include <sys/sysinfo.h>
 #endif
 
 #ifdef __unix__
@@ -184,6 +185,9 @@ bool processOneVanity();
 
 bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom);
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom);
+int bloom_check_mapped(struct bloom *bloom_arg,const void *buffer,int len);
+int bloom_add_mapped(struct bloom *bloom_arg,const void *buffer,int len);
+uint64_t get_total_ram();
 
 void writeFileIfNeeded(const char *fileName);
 
@@ -288,6 +292,9 @@ int FLAGQUIET = 0;
 int FLAGMATRIX = 0;
 int FLAGMAPPED = 0;
 const char *mapped_filename = NULL;
+uint64_t mapped_entries = 0;      /* Requested bloom entries when using --mapped */
+int mapped_splits = 1;            /* Number of files to split the mapped bloom into */
+struct bloom *mapped_filters = NULL; /* Array holding splitted mapped blooms */
 int KFACTOR = 1;
 int MAXLENGTHADDRESS = -1;
 int NTHREADS = 1;
@@ -493,6 +500,8 @@ int main(int argc, char **argv)	{
        int option_index = 0;
        static struct option long_options[] = {
                {"mapped", optional_argument, 0, 0},
+               {"mapped-n", required_argument, 0, 0},
+               {"mapped-split", required_argument, 0, 0},
                {0, 0, 0, 0}
        };
 
@@ -503,6 +512,13 @@ int main(int argc, char **argv)	{
                                if (optarg) {
                                        mapped_filename = optarg;
                                }
+                       } else if (strcmp(long_options[option_index].name, "mapped-n") == 0) {
+                               FLAGMAPPED = 1;
+                               mapped_entries = strtoull(optarg, NULL, 10);
+                       } else if (strcmp(long_options[option_index].name, "mapped-split") == 0) {
+                               FLAGMAPPED = 1;
+                               mapped_splits = (int)strtol(optarg, NULL, 10);
+                               if (mapped_splits < 1) mapped_splits = 1;
                        }
                        continue;
                }
@@ -2483,7 +2499,7 @@ void *thread_process_minikeys(void *vargp)	{
 					secp->GetHash160(P2PKH,false,publickey[0],publickey[1],publickey[2],publickey[3],(uint8_t*)publickeyhashrmd160_uncompress[0],(uint8_t*)publickeyhashrmd160_uncompress[1],(uint8_t*)publickeyhashrmd160_uncompress[2],(uint8_t*)publickeyhashrmd160_uncompress[3]);
 					
 					for(k = 0; k < 4; k++)	{
-						r = bloom_check(&bloom,publickeyhashrmd160_uncompress[k],20);
+                                               r = bloom_check_mapped(&bloom,publickeyhashrmd160_uncompress[k],20);
 						if(r) {
 							r = searchbinary(addressTable,publickeyhashrmd160_uncompress[k],N);
 							if(r) {
@@ -2812,7 +2828,7 @@ void *thread_process(void *vargp)	{
 									if(FLAGSEARCH == SEARCH_COMPRESS || FLAGSEARCH == SEARCH_BOTH){
 										if(FLAGENDOMORPHISM)	{
 											for(l = 0;l < 6; l++)	{
-												r = bloom_check(&bloom,publickeyhashrmd160_endomorphism[l][k],MAXLENGTHADDRESS);
+                                                                                                r = bloom_check_mapped(&bloom,publickeyhashrmd160_endomorphism[l][k],MAXLENGTHADDRESS);
 												if(r) {
 													r = searchbinary(addressTable,publickeyhashrmd160_endomorphism[l][k],N);
 													if(r) {
@@ -2875,7 +2891,7 @@ void *thread_process(void *vargp)	{
 										}
 										else	{
 											for(l = 0;l < 2; l++)	{
-												r = bloom_check(&bloom,publickeyhashrmd160_endomorphism[l][k],MAXLENGTHADDRESS);
+                                                                                                r = bloom_check_mapped(&bloom,publickeyhashrmd160_endomorphism[l][k],MAXLENGTHADDRESS);
 												if(r) {
 													r = searchbinary(addressTable,publickeyhashrmd160_endomorphism[l][k],N);
 													if(r) {
@@ -2899,7 +2915,7 @@ void *thread_process(void *vargp)	{
 									if(FLAGSEARCH == SEARCH_UNCOMPRESS || FLAGSEARCH == SEARCH_BOTH)	{
 										if(FLAGENDOMORPHISM)	{
 											for(l = 6;l < 12; l++)	{	//We check the array from 6 to 12(excluded) because we save the uncompressed information there
-												r = bloom_check(&bloom,publickeyhashrmd160_endomorphism[l][k],MAXLENGTHADDRESS);	//Check in Bloom filter
+												r = bloom_check_mapped(&bloom,publickeyhashrmd160_endomorphism[l][k],MAXLENGTHADDRESS);        //Check in Bloom filter
 												if(r) {
 													r = searchbinary(addressTable,publickeyhashrmd160_endomorphism[l][k],N);		//Check in Array using Binary search
 													if(r) {
@@ -2943,7 +2959,7 @@ void *thread_process(void *vargp)	{
 											}
 										}
 										else	{
-											r = bloom_check(&bloom,publickeyhashrmd160_uncompress[k],MAXLENGTHADDRESS);
+											r = bloom_check_mapped(&bloom,publickeyhashrmd160_uncompress[k],MAXLENGTHADDRESS);
 											if(r) {
 												r = searchbinary(addressTable,publickeyhashrmd160_uncompress[k],N);
 												if(r) {
@@ -2961,7 +2977,7 @@ void *thread_process(void *vargp)	{
 								if(FLAGENDOMORPHISM)	{
 									for(k = 0; k < 4;k++)	{
 										for(l = 0;l < 6; l++)	{
-											r = bloom_check(&bloom,publickeyhashrmd160_endomorphism[l][k],MAXLENGTHADDRESS);
+											r = bloom_check_mapped(&bloom,publickeyhashrmd160_endomorphism[l][k],MAXLENGTHADDRESS);
 											if(r) {
 												r = searchbinary(addressTable,publickeyhashrmd160_endomorphism[l][k],N);
 												if(r) {												
@@ -3007,7 +3023,7 @@ void *thread_process(void *vargp)	{
 								}
 								else	{
 									for(k = 0; k < 4;k++)	{
-										r = bloom_check(&bloom,publickeyhashrmd160_uncompress[k],MAXLENGTHADDRESS);
+										r = bloom_check_mapped(&bloom,publickeyhashrmd160_uncompress[k],MAXLENGTHADDRESS);
 										if(r) {
 											r = searchbinary(addressTable,publickeyhashrmd160_uncompress[k],N);
 											if(r) {
@@ -3025,7 +3041,7 @@ void *thread_process(void *vargp)	{
 							for(k = 0; k < 4;k++)	{
 								if(FLAGENDOMORPHISM)	{
 									pts[(4*j)+k].x.Get32Bytes((unsigned char *)rawvalue);
-									r = bloom_check(&bloom,rawvalue,MAXLENGTHADDRESS);
+									r = bloom_check_mapped(&bloom,rawvalue,MAXLENGTHADDRESS);
 									if(r) {
 										r = searchbinary(addressTable,rawvalue,N);
 										if(r) {
@@ -3037,7 +3053,7 @@ void *thread_process(void *vargp)	{
 										}
 									}
 									endomorphism_beta[(j*4)+k].x.Get32Bytes((unsigned char *)rawvalue);
-									r = bloom_check(&bloom,rawvalue,MAXLENGTHADDRESS);
+									r = bloom_check_mapped(&bloom,rawvalue,MAXLENGTHADDRESS);
 									if(r) {
 										r = searchbinary(addressTable,rawvalue,N);
 										if(r) {
@@ -3051,7 +3067,7 @@ void *thread_process(void *vargp)	{
 									}
 									
 									endomorphism_beta2[(j*4)+k].x.Get32Bytes((unsigned char *)rawvalue);
-									r = bloom_check(&bloom,rawvalue,MAXLENGTHADDRESS);
+									r = bloom_check_mapped(&bloom,rawvalue,MAXLENGTHADDRESS);
 									if(r) {
 										r = searchbinary(addressTable,rawvalue,N);
 										if(r) {
@@ -3065,7 +3081,7 @@ void *thread_process(void *vargp)	{
 								}
 								else	{
 									pts[(4*j)+k].x.Get32Bytes((unsigned char *)rawvalue);
-									r = bloom_check(&bloom,rawvalue,MAXLENGTHADDRESS);
+									r = bloom_check_mapped(&bloom,rawvalue,MAXLENGTHADDRESS);
 									if(r) {
 										r = searchbinary(addressTable,rawvalue,N);
 										if(r) {
@@ -3962,7 +3978,7 @@ pn.y.ModAdd(&GSn[i].y);
 					pts[0] = pn;
 					for(int i = 0; i<CPU_GRP_SIZE && bsgs_found[k]== 0; i++) {
 						pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
-						r = bloom_check(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
+						r = bloom_check_mapped(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
 						if(r) {
 							r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
 							if(r)	{
@@ -4211,7 +4227,7 @@ pn.y.ModAdd(&GSn[i].y);
 					
 					for(int i = 0; i<CPU_GRP_SIZE && bsgs_found[k]== 0; i++) {
 						pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
-						r = bloom_check(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
+						r = bloom_check_mapped(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
 						if(r) {
 							r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
 							if(r)	{
@@ -4313,7 +4329,7 @@ int bsgs_secondcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privateke
 		BSGS_Q_AMP = secp->AddDirect(BSGS_Q,BSGS_AMP2[i]);
 		BSGS_S.Set(BSGS_Q_AMP);
 		BSGS_S.x.Get32Bytes((unsigned char *) xpoint_raw);
-		r = bloom_check(&bloom_bPx2nd[(uint8_t) xpoint_raw[0]],xpoint_raw,32);
+		r = bloom_check_mapped(&bloom_bPx2nd[(uint8_t) xpoint_raw[0]],xpoint_raw,32);
 		if(r)	{
 			found = bsgs_thirdcheck(&base_key,i,k_index,privatekey);
 		}
@@ -4344,7 +4360,7 @@ int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey
 		BSGS_Q_AMP = secp->AddDirect(BSGS_Q,BSGS_AMP3[i]);
 		BSGS_S.Set(BSGS_Q_AMP);
 		BSGS_S.x.Get32Bytes((unsigned char *)xpoint_raw);
-		r = bloom_check(&bloom_bPx3rd[(uint8_t)xpoint_raw[0]],xpoint_raw,32);
+		r = bloom_check_mapped(&bloom_bPx3rd[(uint8_t)xpoint_raw[0]],xpoint_raw,32);
 		if(r)	{
 			r = bsgs_searchbinary(bPtable,xpoint_raw,bsgs_m3,&j);
 			if(r)	{
@@ -4547,11 +4563,11 @@ void *thread_bPload(void *vargp)	{
 				if(!FLAGREADEDFILE4)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
 					WaitForSingleObject(bloom_bPx3rd_mutex[bloom_bP_index], INFINITE);
-					bloom_add(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+					bloom_add_mapped(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 					ReleaseMutex(bloom_bPx3rd_mutex[bloom_bP_index]);
 #else
 					pthread_mutex_lock(&bloom_bPx3rd_mutex[bloom_bP_index]);
-					bloom_add(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+					bloom_add_mapped(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 					pthread_mutex_unlock(&bloom_bPx3rd_mutex[bloom_bP_index]);
 #endif
 				}
@@ -4559,22 +4575,22 @@ void *thread_bPload(void *vargp)	{
 			if(i_counter < bsgs_m2 && !FLAGREADEDFILE2)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
 				WaitForSingleObject(bloom_bPx2nd_mutex[bloom_bP_index], INFINITE);
-				bloom_add(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+				bloom_add_mapped(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 				ReleaseMutex(bloom_bPx2nd_mutex[bloom_bP_index]);
 #else
 				pthread_mutex_lock(&bloom_bPx2nd_mutex[bloom_bP_index]);
-				bloom_add(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+				bloom_add_mapped(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 				pthread_mutex_unlock(&bloom_bPx2nd_mutex[bloom_bP_index]);
 #endif	
 			}
 			if(i_counter < to && !FLAGREADEDFILE1 )	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
 				WaitForSingleObject(bloom_bP_mutex[bloom_bP_index], INFINITE);
-				bloom_add(&bloom_bP[bloom_bP_index], rawvalue ,BSGS_BUFFERXPOINTLENGTH);
+				bloom_add_mapped(&bloom_bP[bloom_bP_index], rawvalue ,BSGS_BUFFERXPOINTLENGTH);
 				ReleaseMutex(bloom_bP_mutex[bloom_bP_index);
 #else
 				pthread_mutex_lock(&bloom_bP_mutex[bloom_bP_index]);
-				bloom_add(&bloom_bP[bloom_bP_index], rawvalue ,BSGS_BUFFERXPOINTLENGTH);
+				bloom_add_mapped(&bloom_bP[bloom_bP_index], rawvalue ,BSGS_BUFFERXPOINTLENGTH);
 				pthread_mutex_unlock(&bloom_bP_mutex[bloom_bP_index]);
 #endif
 			}
@@ -4730,11 +4746,11 @@ void *thread_bPload_2blooms(void *vargp)	{
 				if(!FLAGREADEDFILE4)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
 					WaitForSingleObject(bloom_bPx3rd_mutex[bloom_bP_index], INFINITE);
-					bloom_add(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+					bloom_add_mapped(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 					ReleaseMutex(bloom_bPx3rd_mutex[bloom_bP_index]);
 #else
 					pthread_mutex_lock(&bloom_bPx3rd_mutex[bloom_bP_index]);
-					bloom_add(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+					bloom_add_mapped(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 					pthread_mutex_unlock(&bloom_bPx3rd_mutex[bloom_bP_index]);
 #endif
 				}
@@ -4742,11 +4758,11 @@ void *thread_bPload_2blooms(void *vargp)	{
 			if(i_counter < bsgs_m2 && !FLAGREADEDFILE2)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
 					WaitForSingleObject(bloom_bPx2nd_mutex[bloom_bP_index], INFINITE);
-					bloom_add(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+					bloom_add_mapped(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 					ReleaseMutex(bloom_bPx2nd_mutex[bloom_bP_index]);
 #else
 					pthread_mutex_lock(&bloom_bPx2nd_mutex[bloom_bP_index]);
-					bloom_add(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+					bloom_add_mapped(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 					pthread_mutex_unlock(&bloom_bPx2nd_mutex[bloom_bP_index]);
 #endif			
 			}
@@ -5016,7 +5032,7 @@ pn.y.ModAdd(&GSn[i].y);
 					
 					for(int i = 0; i<CPU_GRP_SIZE && bsgs_found[k]== 0; i++) {
 						pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
-						r = bloom_check(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
+						r = bloom_check_mapped(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
 						if(r) {
 							r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
 							if(r)	{
@@ -5274,7 +5290,7 @@ pn.y.ModAdd(&GSn[i].y);
 					
 					for(int i = 0; i<CPU_GRP_SIZE && bsgs_found[k]== 0; i++) {
 						pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
-						r = bloom_check(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
+						r = bloom_check_mapped(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
 						if(r) {
 							r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
 							if(r)	{
@@ -5558,7 +5574,7 @@ void *thread_process_bsgs_both(void *vargp)	{
 						
 						for(int i = 0; i<CPU_GRP_SIZE && bsgs_found[k]== 0; i++) {
 							pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
-							r = bloom_check(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
+							r = bloom_check_mapped(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
 							if(r) {
 								r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
 								if(r)	{
@@ -6097,7 +6113,7 @@ bool processOneVanity()	{
 	
 	for(i = 0; i < vanity_rmd_targets;i++)	{
 		for(k = 0; k < vanity_rmd_limits[i]; k++)	{
-			bloom_add(vanity_bloom, vanity_rmd_limit_values_A[i][k] ,vanity_rmd_minimun_bytes_check_length);
+			bloom_add_mapped(vanity_bloom, vanity_rmd_limit_values_A[i][k] ,vanity_rmd_minimun_bytes_check_length);
 		}
 	}
 	return true;
@@ -6141,7 +6157,7 @@ bool readFileVanity(char *fileName)	{
 	
 	for(i = 0; i < vanity_rmd_targets ; i++)	{
 		for(k = 0; k < vanity_rmd_limits[i]; k++)	{
-			bloom_add(vanity_bloom, vanity_rmd_limit_values_A[i][k] ,vanity_rmd_minimun_bytes_check_length);
+			bloom_add_mapped(vanity_bloom, vanity_rmd_limit_values_A[i][k] ,vanity_rmd_minimun_bytes_check_length);
 		}
 	}
 	return true;
@@ -6367,7 +6383,7 @@ bool forceReadFileAddress(char *fileName)	{
 				b58tobin(rawvalue,&raw_value_length,aux,r);
 				if(raw_value_length == 25)	{
 					//hextemp = tohex((char*)rawvalue+1,20);
-					bloom_add(&bloom, rawvalue+1 ,sizeof(struct address_value));
+					bloom_add_mapped(&bloom, rawvalue+1 ,sizeof(struct address_value));
 					memcpy(addressTable[i].value,rawvalue+1,sizeof(struct address_value));											
 					i++;
 					validAddress = true;
@@ -6375,7 +6391,7 @@ bool forceReadFileAddress(char *fileName)	{
 			}
 			if(r == 40 && isValidHex(aux))	{	//RMD
 				hexs2bin(aux,rawvalue);				
-				bloom_add(&bloom, rawvalue ,sizeof(struct address_value));
+				bloom_add_mapped(&bloom, rawvalue ,sizeof(struct address_value));
 				memcpy(addressTable[i].value,rawvalue,sizeof(struct address_value));											
 				i++;
 				validAddress = true;
@@ -6441,7 +6457,7 @@ bool forceReadFileAddressEth(char *fileName)	{
 				case 40:
 					if(isValidHex(aux)){
 						hexs2bin(aux,rawvalue);
-						bloom_add(&bloom, rawvalue ,sizeof(struct address_value));
+						bloom_add_mapped(&bloom, rawvalue ,sizeof(struct address_value));
 						memcpy(addressTable[i].value,rawvalue,sizeof(struct address_value));											
 						i++;
 						validAddress = true;
@@ -6450,7 +6466,7 @@ bool forceReadFileAddressEth(char *fileName)	{
 				case 42:
 					if(isValidHex(aux+2)){
 						hexs2bin(aux+2,rawvalue);
-						bloom_add(&bloom, rawvalue ,sizeof(struct address_value));
+						bloom_add_mapped(&bloom, rawvalue ,sizeof(struct address_value));
 						memcpy(addressTable[i].value,rawvalue,sizeof(struct address_value));											
 						i++;
 						validAddress = true;
@@ -6524,7 +6540,7 @@ bool forceReadFileXPoint(char *fileName)	{
 						r = hexs2bin(aux,(uint8_t*) rawvalue);
 						if(r)	{
 							memcpy(addressTable[i].value,rawvalue,20);
-							bloom_add(&bloom,rawvalue,MAXLENGTHADDRESS);
+							bloom_add_mapped(&bloom,rawvalue,MAXLENGTHADDRESS);
 						}
 						else	{
 							fprintf(stderr,"[E] error hexs2bin\n");
@@ -6534,7 +6550,7 @@ bool forceReadFileXPoint(char *fileName)	{
 						r = hexs2bin(aux+2, (uint8_t*)rawvalue);
 						if(r)	{
 							memcpy(addressTable[i].value,rawvalue,20);
-							bloom_add(&bloom,rawvalue,MAXLENGTHADDRESS);
+							bloom_add_mapped(&bloom,rawvalue,MAXLENGTHADDRESS);
 						}
 						else	{
 							fprintf(stderr,"[E] error hexs2bin\n");
@@ -6544,7 +6560,7 @@ bool forceReadFileXPoint(char *fileName)	{
 						r = hexs2bin(aux, (uint8_t*) rawvalue);
 						if(r)	{
 								memcpy(addressTable[i].value,rawvalue+2,20);
-								bloom_add(&bloom,rawvalue,MAXLENGTHADDRESS);
+								bloom_add_mapped(&bloom,rawvalue,MAXLENGTHADDRESS);
 						}
 						else	{
 							fprintf(stderr,"[E] error hexs2bin\n");
@@ -6590,6 +6606,12 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)	{
 			r = false;
 		}
 	}
+        if(r && !FLAGMAPPED){
+                uint64_t ram = get_total_ram();
+                if(ram && bloom_arg->bytes > ram){
+                        fprintf(stderr,"[W] Bloom filter size (%.2f MB) exceeds available RAM (%.2f MB). Consider using --mapped.\n",(double)bloom_arg->bytes/1048576.0,(double)ram/1048576.0);
+                }
+        }
         printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
         return r;
 }
@@ -6597,17 +6619,70 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)	{
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom) {
         if(FLAGMAPPED) {
                 bool r = true;
-                printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
                 const char *fname = mapped_filename ? mapped_filename : "bloom.dat";
-                uint64_t total = (items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom;
-                if(bloom_init_mmap(bloom_arg,total,0.000001,fname) == 1){
-                        fprintf(stderr,"[E] error bloom_init_mmap for %" PRIu64 " elements.\n",items_bloom);
-                        r = false;
+                uint64_t total = mapped_entries ? mapped_entries : ((items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom);
+                printf("[+] Bloom filter for %" PRIu64 " elements.\n",total);
+                if(mapped_splits <= 1) {
+                        if(bloom_init_mmap(bloom_arg,total,0.000001,fname) == 1){
+                                fprintf(stderr,"[E] error bloom_init_mmap for %" PRIu64 " elements.\n",total);
+                                r = false;
+                        } else {
+                                mapped_filters = bloom_arg;
+                        }
+                } else {
+                        mapped_filters = (struct bloom*)calloc(mapped_splits,sizeof(struct bloom));
+                        checkpointer((void*)mapped_filters,__FILE__,"calloc","mapped_filters",__LINE__-1);
+                        for(int i=0;i<mapped_splits;i++){
+                                char part[1024];
+                                snprintf(part,sizeof(part),"%s.%d",fname,i);
+                                uint64_t per = total/mapped_splits;
+                                if(per < 1000) per = 1000;
+                                if(bloom_init_mmap(&mapped_filters[i],per,0.000001,part) == 1){
+                                        fprintf(stderr,"[E] error bloom_init_mmap part %d for %" PRIu64 " elements.\n",i,per);
+                                        r = false;
+                                }
+                        }
+                        if(r) *bloom_arg = mapped_filters[0];
                 }
-                printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                if(r){
+                        double mb = (double)(((double)(mapped_filters?mapped_filters[0].bytes:0))/(double)1048576);
+                        mb *= mapped_splits;
+                        printf("[+] Loading data to the bloomfilter total: %.2f MB\n",mb);
+                }
                 return r;
         }
         return initBloomFilter(bloom_arg,items_bloom);
+}
+
+int bloom_check_mapped(struct bloom *bloom_arg,const void *buffer,int len){
+        if(!FLAGMAPPED || mapped_splits<=1){
+                return bloom_check(bloom_arg,buffer,len);
+        }
+        for(int i=0;i<mapped_splits;i++){
+                if(bloom_check(&mapped_filters[i],buffer,len)){
+                        return 1;
+                }
+        }
+        return 0;
+}
+
+int bloom_add_mapped(struct bloom *bloom_arg,const void *buffer,int len){
+        if(!FLAGMAPPED || mapped_splits<=1){
+                return bloom_add(bloom_arg,buffer,len);
+        }
+        int r=0;
+        for(int i=0;i<mapped_splits;i++){
+                r |= bloom_add(&mapped_filters[i],buffer,len);
+        }
+        return r;
+}
+
+uint64_t get_total_ram(){
+        struct sysinfo info;
+        if(sysinfo(&info) == 0){
+                return (uint64_t)info.totalram * info.mem_unit;
+        }
+        return 0;
 }
 
 void writeFileIfNeeded(const char *fileName)	{
