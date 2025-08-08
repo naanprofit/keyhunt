@@ -6660,12 +6660,21 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
         bool r = true;
         printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
         uint64_t total = (items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom;
-        uint64_t need_bytes = bloom_bytes_for_entries(total);
-        warn_if_insufficient_ram(need_bytes);
-        if(bloom_init2(bloom_arg,total,0.000001) == 1){
-                fprintf(stderr,"[E] error bloom_init for %" PRIu64 " elements.\n",items_bloom);
-                r = false;
-        }
+       uint64_t need_bytes = bloom_bytes_for_entries(total);
+       if(!warn_if_insufficient_ram(need_bytes)){
+               if(!FLAGMAPPED){
+                       fprintf(stderr,"[W] Insufficient RAM; switching to mapped bloom filter.\n");
+                       FLAGMAPPED = 1;
+                       return initBloomFilterMapped(bloom_arg,items_bloom);
+               }else{
+                       fprintf(stderr,"[E] Insufficient RAM for bloom filter. Aborting.\n");
+                       return false;
+               }
+       }
+       if(bloom_init2(bloom_arg,total,0.000001) == 1){
+               fprintf(stderr,"[E] error bloom_init for %" PRIu64 " elements.\n",items_bloom);
+               r = false;
+       }
         printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
         return r;
 }
