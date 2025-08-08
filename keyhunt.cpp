@@ -34,6 +34,7 @@ email: albertobsd@gmail.com
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/random.h>
+#include <getopt.h>
 #endif
 
 #ifdef __unix__
@@ -308,6 +309,16 @@ int FLAGRANDOM = 0;
 int FLAG_N = 0;
 int FLAGPRECALCUTED_P_FILE = 0;
 
+int FLAGMAPPED = 0;
+uint64_t MAPPEDSIZE = 0;
+uint32_t MAPPEDSPLITS = 0;
+
+enum {
+    OPT_MAPPED = 1000,
+    OPT_MAPPED_SIZE,
+    OPT_MAPPED_SPLITS
+};
+
 int bitrange;
 char *str_N;
 char *range_start;
@@ -483,16 +494,33 @@ int main(int argc, char **argv)	{
 #endif
 	
 	
-	
-	printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
-	while ((c = getopt(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:")) != -1) {
-		switch(c) {
-			case 'h':
-				menu();
-			break;
-			case '6':
-				FLAGSKIPCHECKSUM = 1;
+        printf("[+] Version %s, developed by AlbertoBSD\n",version);
+        static struct option long_options[] = {
+                {"mapped", no_argument, 0, OPT_MAPPED},
+                {"mapped-size", required_argument, 0, OPT_MAPPED_SIZE},
+                {"mapped-splits", required_argument, 0, OPT_MAPPED_SPLITS},
+                {0, 0, 0, 0}
+        };
+
+        while ((c = getopt_long(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, NULL)) != -1) {
+                switch(c) {
+                        case OPT_MAPPED:
+                                FLAGMAPPED = 1;
+                        break;
+                        case OPT_MAPPED_SIZE:
+                                FLAGMAPPED = 1;
+                                MAPPEDSIZE = strtoull(optarg, NULL, 10);
+                        break;
+                        case OPT_MAPPED_SPLITS:
+                                FLAGMAPPED = 1;
+                                MAPPEDSPLITS = (uint32_t)strtoul(optarg, NULL, 10);
+                        break;
+                        case 'h':
+                                menu();
+                        break;
+                        case '6':
+                                FLAGSKIPCHECKSUM = 1;
 				fprintf(stderr,"[W] Skipping checksums on files\n");
 			break;
 			case 'B':
@@ -5762,9 +5790,12 @@ void menu() {
 	printf("-S          S is for SAVING in files BSGS data (Bloom filters and bPtable)\n");
 	printf("-6          to skip sha256 Checksum on data files");
 	printf("-t tn       Threads number, must be a positive integer\n");
-	printf("-v value    Search for vanity Address, only with -m vanity\n");
-	printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
-	printf("\nExample:\n\n");
+        printf("-v value    Search for vanity Address, only with -m vanity\n");
+        printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
+        printf("--mapped    Enable memory-mapped bloom filter files (uses -n and -k sizing by default)\n");
+        printf("--mapped-size <bytes|N> Override bloom filter size or entry count (ignores -n and -k)\n");
+        printf("--mapped-splits <count> Split mapped bloom into <count> files\n");
+        printf("\nExample:\n\n");
 	printf("./keyhunt -m rmd160 -f tests/unsolvedpuzzles.rmd -b 66 -l compress -R -q -t 8\n\n");
 	printf("This line runs the program with 8 threads from the range 20000000000000000 to 40000000000000000 without stats output\n\n");
 	printf("Developed by AlbertoBSD\tTips BTC: 1Coffee1jV4gB5gaXfHgSHDz9xx9QSECVW\n");
