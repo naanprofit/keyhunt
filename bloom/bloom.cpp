@@ -347,7 +347,6 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
     return 1;
   }
   close(fd);
-  memset(bloom->bf, 0, bloom->bytes);
 
   bloom->ready = 1;
   bloom->major = BLOOM_VERSION_MAJOR;

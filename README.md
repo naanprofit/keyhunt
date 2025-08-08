@@ -32,6 +32,14 @@ You need to add `-t numberThreads` to get better speed
 
 You need to add `-t numberThreads` and `-k factor` to get better speed
 
+### Memory mapped bloom filters
+
+Keyhunt can store the bloom filter directly on disk so it can grow beyond available RAM.
+Use `--mapped[=file]` to create or use a file backed bloom filter. The optional
+`--mapped-size <entries>` flag reserves space for a specific number of entries when
+creating the mapped file. Without `--mapped`, keyhunt will keep the bloom filter in
+memory and will warn if it does not fit in the available RAM.
+
 ## Free Code
 
 This code is free of charge, see the licence for more details. https://github.com/albertobsd/keyhunt/blob/main/LICENSE
