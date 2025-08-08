@@ -19,6 +19,11 @@
 #include <sys/stat.h>
 #include <inttypes.h>
 #include <sys/types.h>
+#ifndef _WIN64
+#include <sys/mman.h>
+#else
+#include <io.h>
+#endif
 #include <unistd.h>
 #include <pthread.h>
 
@@ -125,6 +130,138 @@ int bloom_init2(struct bloom * bloom, uint64_t entries, long double error)
   return 0;
 }
 
+int bloom_init_mapped(struct bloom *bloom, const char *path,
+                      uint64_t entries, long double error,
+                      uint32_t segments)
+{
+  memset(bloom, 0, sizeof(struct bloom));
+  if (entries < 1000 || error <= 0 || error >= 1) {
+    return 1;
+  }
+
+  bloom->entries = entries;
+  bloom->error = error;
+
+  long double num = -log(bloom->error);
+  long double denom = 0.480453013918201; // ln(2)^2
+  bloom->bpe = (num / denom);
+
+  long double dentries = (long double)entries;
+  long double allbits = dentries * bloom->bpe;
+  bloom->bits = (uint64_t)allbits;
+
+  bloom->bytes = (uint64_t)bloom->bits / 8;
+  if (bloom->bits % 8) {
+    bloom->bytes += 1;
+  }
+
+  bloom->hashes = (uint8_t)ceil(0.693147180559945 * bloom->bpe); // ln(2)
+
+  if (segments == 0) segments = 1;
+  bloom->segments = segments;
+
+  bloom->segment_ptrs =
+      (uint8_t **)calloc(bloom->segments, sizeof(uint8_t *));
+  bloom->segment_sizes =
+      (size_t *)calloc(bloom->segments, sizeof(size_t));
+#ifdef _WIN64
+  bloom->segment_fds =
+      (HANDLE *)calloc(bloom->segments, sizeof(HANDLE));
+#else
+  bloom->segment_fds =
+      (int *)calloc(bloom->segments, sizeof(int));
+#endif
+  if (!bloom->segment_ptrs || !bloom->segment_sizes || !bloom->segment_fds) {
+    free(bloom->segment_ptrs);
+    free(bloom->segment_sizes);
+    free(bloom->segment_fds);
+    return 1;
+  }
+
+  size_t seg_bytes = bloom->bytes / bloom->segments;
+  size_t remainder = bloom->bytes % bloom->segments;
+
+  void *addr = NULL;
+  for (uint32_t i = 0; i < bloom->segments; i++) {
+    size_t this_seg = seg_bytes + (i == bloom->segments - 1 ? remainder : 0);
+    bloom->segment_sizes[i] = this_seg;
+    char *fname;
+    size_t pathlen = strlen(path) + 32;
+    fname = (char *)malloc(pathlen);
+    if (!fname) {
+      bloom_free_mapped(bloom);
+      return 1;
+    }
+    if (bloom->segments == 1) {
+      snprintf(fname, pathlen, "%s", path);
+    } else {
+      snprintf(fname, pathlen, "%s.%u", path, i);
+    }
+#ifdef _WIN64
+    HANDLE hFile = CreateFile(fname, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(fname);
+    if (hFile == INVALID_HANDLE_VALUE) {
+      bloom_free_mapped(bloom);
+      return 1;
+    }
+    LARGE_INTEGER sz;
+    sz.QuadPart = this_seg;
+    if (SetFilePointerEx(hFile, sz, NULL, FILE_BEGIN) == 0 ||
+        SetEndOfFile(hFile) == 0) {
+      CloseHandle(hFile);
+      bloom_free_mapped(bloom);
+      return 1;
+    }
+    HANDLE hMap = CreateFileMapping(hFile, NULL, PAGE_READWRITE, 0, 0, NULL);
+    if (hMap == NULL) {
+      CloseHandle(hFile);
+      bloom_free_mapped(bloom);
+      return 1;
+    }
+    void *map = MapViewOfFileEx(hMap, FILE_MAP_ALL_ACCESS, 0, 0, this_seg, addr);
+    CloseHandle(hMap);
+    if (!map) {
+      CloseHandle(hFile);
+      bloom_free_mapped(bloom);
+      return 1;
+    }
+    bloom->segment_fds[i] = hFile;
+    bloom->segment_ptrs[i] = (uint8_t *)map;
+#else
+    int fd = open(fname, O_RDWR | O_CREAT, 0644);
+    free(fname);
+    if (fd < 0) {
+      bloom_free_mapped(bloom);
+      return 1;
+    }
+    if (ftruncate(fd, (off_t)this_seg) != 0) {
+      close(fd);
+      bloom_free_mapped(bloom);
+      return 1;
+    }
+    void *map = mmap(addr, this_seg, PROT_READ | PROT_WRITE,
+                     MAP_SHARED | (addr ? MAP_FIXED : 0), fd, 0);
+    if (map == MAP_FAILED) {
+      close(fd);
+      bloom_free_mapped(bloom);
+      return 1;
+    }
+    bloom->segment_fds[i] = fd;
+    bloom->segment_ptrs[i] = (uint8_t *)map;
+#endif
+    if (i == 0) {
+      bloom->bf = bloom->segment_ptrs[i];
+    }
+    addr = bloom->segment_ptrs[i] + this_seg;
+  }
+
+  bloom->ready = 1;
+  bloom->major = BLOOM_VERSION_MAJOR;
+  bloom->minor = BLOOM_VERSION_MINOR;
+  return 0;
+}
+
 int bloom_check(struct bloom * bloom, const void * buffer, int len)
 {
   if (bloom->ready == 0) {
@@ -172,9 +309,51 @@ void bloom_print(struct bloom * bloom)
   printf(" ->hash functions = %d\n", bloom->hashes);
 }
 
+void bloom_free_mapped(struct bloom *bloom)
+{
+  if (!bloom->ready && bloom->segments == 0) {
+    return;
+  }
+
+  if (bloom->segments == 0) {
+    if (bloom->ready && bloom->bf) {
+      free(bloom->bf);
+    }
+    bloom->ready = 0;
+    return;
+  }
+
+  for (uint32_t i = 0; i < bloom->segments; i++) {
+    if (bloom->segment_ptrs && bloom->segment_ptrs[i]) {
+#ifdef _WIN64
+      UnmapViewOfFile(bloom->segment_ptrs[i]);
+      if (bloom->segment_fds)
+        CloseHandle(bloom->segment_fds[i]);
+#else
+      munmap(bloom->segment_ptrs[i], bloom->segment_sizes[i]);
+      if (bloom->segment_fds)
+        close(bloom->segment_fds[i]);
+#endif
+    }
+  }
+  free(bloom->segment_ptrs);
+  free(bloom->segment_sizes);
+  free(bloom->segment_fds);
+  bloom->segment_ptrs = NULL;
+  bloom->segment_sizes = NULL;
+  bloom->segment_fds = NULL;
+  bloom->segments = 0;
+  bloom->bf = NULL;
+  bloom->ready = 0;
+}
+
 void bloom_free(struct bloom * bloom)
 {
-  if (bloom->ready) {
+  if (bloom->segments > 0) {
+    bloom_free_mapped(bloom);
+    return;
+  }
+  if (bloom->ready && bloom->bf) {
     free(bloom->bf);
   }
   bloom->ready = 0;
