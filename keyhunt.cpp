@@ -35,6 +35,7 @@ email: albertobsd@gmail.com
 #include <pthread.h>
 #include <sys/random.h>
 #include <getopt.h>
+#include <sys/sysinfo.h>
 #endif
 
 #ifdef __unix__
@@ -184,6 +185,8 @@ bool processOneVanity();
 
 bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom);
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom);
+uint64_t bloom_bytes_for_entries(uint64_t entries);
+bool warn_if_insufficient_ram(uint64_t need_bytes);
 
 void writeFileIfNeeded(const char *fileName);
 
@@ -288,6 +291,7 @@ int FLAGQUIET = 0;
 int FLAGMATRIX = 0;
 int FLAGMAPPED = 0;
 const char *mapped_filename = NULL;
+uint64_t mapped_entries_override = 0;
 int KFACTOR = 1;
 int MAXLENGTHADDRESS = -1;
 int NTHREADS = 1;
@@ -491,21 +495,25 @@ int main(int argc, char **argv)	{
        printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
        int option_index = 0;
-       static struct option long_options[] = {
-               {"mapped", optional_argument, 0, 0},
-               {0, 0, 0, 0}
-       };
+      static struct option long_options[] = {
+              {"mapped", optional_argument, 0, 0},
+              {"mapped-size", required_argument, 0, 0},
+              {0, 0, 0, 0}
+      };
 
        while ((c = getopt_long(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, &option_index)) != -1) {
-               if (c == 0) {
-                       if (strcmp(long_options[option_index].name, "mapped") == 0) {
-                               FLAGMAPPED = 1;
-                               if (optarg) {
-                                       mapped_filename = optarg;
-                               }
-                       }
-                       continue;
-               }
+              if (c == 0) {
+                      if (strcmp(long_options[option_index].name, "mapped") == 0) {
+                              FLAGMAPPED = 1;
+                              if (optarg) {
+                                      mapped_filename = optarg;
+                              }
+                      } else if (strcmp(long_options[option_index].name, "mapped-size") == 0) {
+                              FLAGMAPPED = 1;
+                              mapped_entries_override = strtoull(optarg, NULL, 10);
+                      }
+                      continue;
+              }
                switch(c) {
 			case 'h':
 				menu();
@@ -5782,8 +5790,10 @@ void menu() {
 	printf("-6          to skip sha256 Checksum on data files");
 	printf("-t tn       Threads number, must be a positive integer\n");
 	printf("-v value    Search for vanity Address, only with -m vanity\n");
-	printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
-	printf("\nExample:\n\n");
+        printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
+        printf("--mapped[=file]   Use a memory mapped bloom filter file instead of RAM\n");
+        printf("--mapped-size n   Reserve space for n entries in the mapped bloom file\n");
+        printf("\nExample:\n\n");
 	printf("./keyhunt -m rmd160 -f tests/unsolvedpuzzles.rmd -b 66 -l compress -R -q -t 8\n\n");
 	printf("This line runs the program with 8 threads from the range 20000000000000000 to 40000000000000000 without stats output\n\n");
 	printf("Developed by AlbertoBSD\tTips BTC: 1Coffee1jV4gB5gaXfHgSHDz9xx9QSECVW\n");
@@ -6566,40 +6576,78 @@ bool forceReadFileXPoint(char *fileName)	{
 		}
 		i++;
 	}
-	fclose(fileDescriptor);
-	return true;
+        fclose(fileDescriptor);
+        return true;
 }
 
+uint64_t bloom_bytes_for_entries(uint64_t entries) {
+        long double num = -log(0.000001L);
+        long double denom = 0.480453013918201L;
+        long double bpe = num / denom;
+        long double dentries = (long double)entries;
+        long double allbits = dentries * bpe;
+        uint64_t bits = (uint64_t)allbits;
+        uint64_t bytes = bits / 8;
+        if (bits % 8) {
+                bytes += 1;
+        }
+        return bytes;
+}
+
+bool warn_if_insufficient_ram(uint64_t need_bytes) {
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        MEMORYSTATUSEX statex;
+        statex.dwLength = sizeof(statex);
+        if (GlobalMemoryStatusEx(&statex)) {
+                uint64_t avail = statex.ullAvailPhys;
+                if (need_bytes > avail) {
+                        fprintf(stderr,
+                                "[W] Bloom filter of %.2f MB exceeds available RAM %.2f MB, consider using --mapped.\n",
+                                (double)need_bytes/1048576.0, (double)avail/1048576.0);
+                        return false;
+                }
+        }
+#else
+        struct sysinfo info;
+        if (sysinfo(&info) == 0) {
+                uint64_t avail = (uint64_t)info.freeram * info.mem_unit;
+                if (need_bytes > avail) {
+                        fprintf(stderr,
+                                "[W] Bloom filter of %.2f MB exceeds available RAM %.2f MB, consider using --mapped.\n",
+                                (double)need_bytes/1048576.0, (double)avail/1048576.0);
+                        return false;
+                }
+        }
+#endif
+        return true;
+}
 
 /*
-	I write this as a function because i have the same segment of code in 3 different functions
+        I write this as a function because i have the same segment of code in 3 different functions
 */
 
-bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)	{
-	bool r = true;
-	printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
-	if(items_bloom <= 10000)	{
-		if(bloom_init2(bloom_arg,10000,0.000001) == 1){
-			fprintf(stderr,"[E] error bloom_init for 10000 elements.\n");
-			r = false;
-		}
-	}
-	else	{
-		if(bloom_init2(bloom_arg,FLAGBLOOMMULTIPLIER*items_bloom,0.000001)	== 1){
-			fprintf(stderr,"[E] error bloom_init for %" PRIu64 " elements.\n",items_bloom);
-			r = false;
-		}
-	}
+bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
+        bool r = true;
+        printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
+        uint64_t total = (items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom;
+        uint64_t need_bytes = bloom_bytes_for_entries(total);
+        warn_if_insufficient_ram(need_bytes);
+        if(bloom_init2(bloom_arg,total,0.000001) == 1){
+                fprintf(stderr,"[E] error bloom_init for %" PRIu64 " elements.\n",items_bloom);
+                r = false;
+        }
         printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
         return r;
 }
+
+
 
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom) {
         if(FLAGMAPPED) {
                 bool r = true;
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
                 const char *fname = mapped_filename ? mapped_filename : "bloom.dat";
-                uint64_t total = (items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom;
+                uint64_t total = mapped_entries_override ? mapped_entries_override : ((items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom);
                 if(bloom_init_mmap(bloom_arg,total,0.000001,fname) == 1){
                         fprintf(stderr,"[E] error bloom_init_mmap for %" PRIu64 " elements.\n",items_bloom);
                         r = false;
