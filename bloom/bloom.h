@@ -11,6 +11,8 @@
 #ifdef _WIN64
 #include <windows.h>
 #endif
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +44,23 @@ struct bloom
   uint8_t minor;
   double bpe;
   uint8_t *bf;
+
+  /*
+   * Fields for memory-mapped bloom filters. When \p segments is greater than
+   * zero the filter data is backed by one or more files.  The first segment is
+   * always exposed through \p bf so the existing read/write helpers continue to
+   * work as before.  Each additional segment is mapped sequentially and stored
+   * in \p segments_ptr.  These fields are considered private and may change at
+   * any time.
+   */
+#ifdef _WIN64
+  HANDLE *segment_fds;
+#else
+  int    *segment_fds;
+#endif
+  uint8_t **segment_ptrs;
+  size_t *segment_sizes;
+  uint32_t segments;
 };
 /*
 Customs
@@ -89,6 +108,29 @@ int bloom_init2(struct bloom * bloom, uint64_t entries, long double error);
  *
  */
 int bloom_init(struct bloom * bloom, uint64_t entries, long double error);
+
+/** ***************************************************************************
+ * Initialize a bloom filter backed by a file mapping.
+ *
+ * Parameters:
+ * -----------
+ *     bloom    - Pointer to an allocated struct bloom.
+ *     path     - Path prefix for the backing file.  If \p segments is greater
+ *                than one, files will be created with sequential numeric
+ *                suffixes appended to this path.
+ *     entries  - Expected number of entries which will be inserted.
+ *     error    - Probability of collision.
+ *     segments - Optional number of segments/files to create. Use 0 or 1 for a
+ *                single file.
+ *
+ * Return:
+ * -------
+ *     0 - on success
+ *     1 - on failure
+ */
+int bloom_init_mapped(struct bloom *bloom, const char *path,
+                      uint64_t entries, long double error,
+                      uint32_t segments);
 
 
 /** ***************************************************************************
@@ -153,6 +195,12 @@ void bloom_print(struct bloom * bloom);
  *
  */
 void bloom_free(struct bloom * bloom);
+
+/** ***************************************************************************
+ * Teardown helper for bloom filters initialized with bloom_init_mapped().
+ * This unmaps all memory segments and closes the backing file descriptors.
+ */
+void bloom_free_mapped(struct bloom * bloom);
 
 
 /** ***************************************************************************
