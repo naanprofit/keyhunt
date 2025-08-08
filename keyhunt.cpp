@@ -2278,11 +2278,40 @@ int main(int argc, char **argv)	{
 			}
 		}
 	}while(continue_flag);
-	printf("\nEnd\n");
+        printf("\nEnd\n");
+        if (FLAGMAPPED) {
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                bloom_free(&bloom);
+                if (vanity_bloom)
+                        bloom_free(vanity_bloom);
+                if (bloom_bP)
+                        for(i = 0; i < 256; i++)
+                                bloom_free(&bloom_bP[i]);
+                if (bloom_bPx2nd)
+                        for(i = 0; i < 256; i++)
+                                bloom_free(&bloom_bPx2nd[i]);
+                if (bloom_bPx3rd)
+                        for(i = 0; i < 256; i++)
+                                bloom_free(&bloom_bPx3rd[i]);
+#else
+                bloom_unmap(&bloom);
+                if (vanity_bloom)
+                        bloom_unmap(vanity_bloom);
+                if (bloom_bP)
+                        for(i = 0; i < 256; i++)
+                                bloom_unmap(&bloom_bP[i]);
+                if (bloom_bPx2nd)
+                        for(i = 0; i < 256; i++)
+                                bloom_unmap(&bloom_bPx2nd[i]);
+                if (bloom_bPx3rd)
+                        for(i = 0; i < 256; i++)
+                                bloom_unmap(&bloom_bPx3rd[i]);
+#endif
+        }
 #ifdef _WIN64
-	CloseHandle(write_keys);
-	CloseHandle(write_random);
-	CloseHandle(bsgs_thread);
+        CloseHandle(write_keys);
+        CloseHandle(write_random);
+        CloseHandle(bsgs_thread);
 #endif
 }
 
