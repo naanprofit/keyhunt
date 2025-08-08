@@ -305,8 +305,14 @@ const char * bloom_version()
  * Initialize bloom filter backed by a memory mapped file. The resulting
  * bloom->bf points directly to the mapped region so the filter can be
  * larger than available RAM.
+ *
+ * If the file already exists and its size matches the expected size for the
+ * requested number of entries, it will be mapped as is without truncation.
+ * When @resize is non-zero, an existing file will be resized to match the
+ * requested number of entries. If the file exists with a different size and
+ * @resize is zero, an error is returned and no mapping occurs.
  */
-int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename)
+int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename, int resize)
 {
   memset(bloom, 0, sizeof(struct bloom));
   if (entries < 1000 || error <= 0 || error >= 1) {
@@ -331,13 +337,37 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
 
   bloom->hashes = (uint8_t)ceil(0.693147180559945 * bloom->bpe); // ln(2)
 
-  int fd = open(filename, O_RDWR | O_CREAT, 0644);
-  if (fd < 0) {
-    return 1;
-  }
-  if (ftruncate(fd, bloom->bytes) != 0) {
-    close(fd);
-    return 1;
+  struct stat st;
+  int fd;
+  int file_exists = (stat(filename, &st) == 0);
+
+  if (file_exists) {
+    fd = open(filename, O_RDWR);
+    if (fd < 0) {
+      return 1;
+    }
+    if ((uint64_t)st.st_size != bloom->bytes) {
+      if (resize) {
+        if (ftruncate(fd, bloom->bytes) != 0) {
+          close(fd);
+          return 1;
+        }
+      } else {
+        fprintf(stderr, "bloom_init_mmap: file '%s' size %lld does not match expected %llu\n",
+                filename, (long long)st.st_size, (unsigned long long)bloom->bytes);
+        close(fd);
+        return 1;
+      }
+    }
+  } else {
+    fd = open(filename, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
+      return 1;
+    }
+    if (ftruncate(fd, bloom->bytes) != 0) {
+      close(fd);
+      return 1;
+    }
   }
 
   bloom->bf = (uint8_t*)mmap(NULL, bloom->bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -363,9 +393,10 @@ void bloom_unmap(struct bloom *bloom)
   bloom->ready = 0;
 }
 #else
-int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename)
+int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename, int resize)
 {
   (void)filename;
+  (void)resize;
   return bloom_init2(bloom, entries, error);
 }
 
