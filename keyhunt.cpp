@@ -36,6 +36,7 @@ email: albertobsd@gmail.com
 #include <sys/random.h>
 #include <getopt.h>
 #include <sys/sysinfo.h>
+#include <sys/mman.h>
 #endif
 
 #ifdef __unix__
@@ -1262,7 +1263,7 @@ int main(int argc, char **argv)	{
 #else
 			pthread_mutex_init(&bloom_bP_mutex[i],NULL);
 #endif
-			if(bloom_init2(&bloom_bP[i],itemsbloom,0.000001)	== 1){
+			if(!initBloomFilterMapped(&bloom_bP[i],itemsbloom)){
 				fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
 				exit(EXIT_FAILURE);
 			}
@@ -1291,7 +1292,7 @@ int main(int argc, char **argv)	{
 #else
 			pthread_mutex_init(&bloom_bPx2nd_mutex[i],NULL);
 #endif
-			if(bloom_init2(&bloom_bPx2nd[i],itemsbloom2,0.000001)	== 1){
+			if(!initBloomFilterMapped(&bloom_bPx2nd[i],itemsbloom2)){
 				fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
 				exit(EXIT_FAILURE);
 			}
@@ -1320,7 +1321,7 @@ int main(int argc, char **argv)	{
 #else
 			pthread_mutex_init(&bloom_bPx3rd_mutex[i],NULL);
 #endif
-			if(bloom_init2(&bloom_bPx3rd[i],itemsbloom3,0.000001)	== 1){
+			if(!initBloomFilterMapped(&bloom_bPx3rd[i],itemsbloom3)){
 				fprintf(stderr,"[E] error bloom_init [%" PRIu64 "]\n",i);
 				exit(EXIT_FAILURE);
 			}
@@ -1397,7 +1398,7 @@ int main(int argc, char **argv)	{
 		checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
 		memset(bPtable,0,bytes);
 		
-		if(FLAGSAVEREADFILE)	{
+		if(FLAGSAVEREADFILE && !FLAGMAPPED)	{
 			/*Reading file for 1st bloom filter */
 
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_4_%" PRIu64 ".blm",bsgs_m);
