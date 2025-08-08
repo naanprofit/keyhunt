@@ -215,6 +215,10 @@ int bloom_reset(struct bloom * bloom);
  */
 const char * bloom_version();
 
+/* Additional helpers for memory mapped bloom filters */
+int bloom_init_mmap(struct bloom * bloom, uint64_t entries, long double error, const char *filename);
+void bloom_unmap(struct bloom * bloom);
+
 #ifdef __cplusplus
 }
 #endif

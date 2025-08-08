@@ -21,6 +21,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <pthread.h>
+#ifndef _WIN64
+#include <sys/mman.h>
+#endif
 
 #include "bloom.h"
 #include "../xxhash/xxhash.h"
@@ -296,3 +299,79 @@ const char * bloom_version()
 {
   return MAKESTRING(BLOOM_VERSION);
 }
+
+#ifndef _WIN64
+/*
+ * Initialize bloom filter backed by a memory mapped file. The resulting
+ * bloom->bf points directly to the mapped region so the filter can be
+ * larger than available RAM.
+ */
+int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename)
+{
+  memset(bloom, 0, sizeof(struct bloom));
+  if (entries < 1000 || error <= 0 || error >= 1) {
+    return 1;
+  }
+
+  bloom->entries = entries;
+  bloom->error = error;
+
+  long double num = -log(bloom->error);
+  long double denom = 0.480453013918201; // ln(2)^2
+  bloom->bpe = (num / denom);
+
+  long double dentries = (long double)entries;
+  long double allbits = dentries * bloom->bpe;
+  bloom->bits = (uint64_t)allbits;
+
+  bloom->bytes = (uint64_t)bloom->bits / 8;
+  if (bloom->bits % 8) {
+    bloom->bytes += 1;
+  }
+
+  bloom->hashes = (uint8_t)ceil(0.693147180559945 * bloom->bpe); // ln(2)
+
+  int fd = open(filename, O_RDWR | O_CREAT, 0644);
+  if (fd < 0) {
+    return 1;
+  }
+  if (ftruncate(fd, bloom->bytes) != 0) {
+    close(fd);
+    return 1;
+  }
+
+  bloom->bf = (uint8_t*)mmap(NULL, bloom->bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (bloom->bf == MAP_FAILED) {
+    bloom->bf = NULL;
+    close(fd);
+    return 1;
+  }
+  close(fd);
+  memset(bloom->bf, 0, bloom->bytes);
+
+  bloom->ready = 1;
+  bloom->major = BLOOM_VERSION_MAJOR;
+  bloom->minor = BLOOM_VERSION_MINOR;
+  return 0;
+}
+
+void bloom_unmap(struct bloom *bloom)
+{
+  if (bloom->bf && bloom->bytes) {
+    munmap(bloom->bf, bloom->bytes);
+    bloom->bf = NULL;
+  }
+  bloom->ready = 0;
+}
+#else
+int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename)
+{
+  (void)filename;
+  return bloom_init2(bloom, entries, error);
+}
+
+void bloom_unmap(struct bloom *bloom)
+{
+  bloom_free(bloom);
+}
+#endif

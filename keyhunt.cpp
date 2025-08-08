@@ -34,6 +34,7 @@ email: albertobsd@gmail.com
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/random.h>
+#include <getopt.h>
 #endif
 
 #ifdef __unix__
@@ -182,6 +183,7 @@ bool forceReadFileXPoint(char *fileName);
 bool processOneVanity();
 
 bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom);
+bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom);
 
 void writeFileIfNeeded(const char *fileName);
 
@@ -284,6 +286,8 @@ int FLAGBSGSMODE = 0;
 int FLAGDEBUG = 0;
 int FLAGQUIET = 0;
 int FLAGMATRIX = 0;
+int FLAGMAPPED = 0;
+const char *mapped_filename = NULL;
 int KFACTOR = 1;
 int MAXLENGTHADDRESS = -1;
 int NTHREADS = 1;
@@ -484,10 +488,25 @@ int main(int argc, char **argv)	{
 	
 	
 	
-	printf("[+] Version %s, developed by AlbertoBSD\n",version);
+       printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
-	while ((c = getopt(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:")) != -1) {
-		switch(c) {
+       int option_index = 0;
+       static struct option long_options[] = {
+               {"mapped", optional_argument, 0, 0},
+               {0, 0, 0, 0}
+       };
+
+       while ((c = getopt_long(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, &option_index)) != -1) {
+               if (c == 0) {
+                       if (strcmp(long_options[option_index].name, "mapped") == 0) {
+                               FLAGMAPPED = 1;
+                               if (optarg) {
+                                       mapped_filename = optarg;
+                               }
+                       }
+                       continue;
+               }
+               switch(c) {
 			case 'h':
 				menu();
 			break;
@@ -6073,7 +6092,7 @@ bool processOneVanity()	{
 		return false;
 	}
 
-	if(!initBloomFilter(vanity_bloom, vanity_rmd_total))
+   if(!initBloomFilterMapped(vanity_bloom, vanity_rmd_total))
 		return false;
 	
 	for(i = 0; i < vanity_rmd_targets;i++)	{
@@ -6117,7 +6136,7 @@ bool readFileVanity(char *fileName)	{
 	}
 	
 	N = vanity_rmd_total;
-	if(!initBloomFilter(vanity_bloom,N))
+   if(!initBloomFilterMapped(vanity_bloom,N))
 		return false;
 	
 	for(i = 0; i < vanity_rmd_targets ; i++)	{
@@ -6331,7 +6350,7 @@ bool forceReadFileAddress(char *fileName)	{
 	addressTable = (struct address_value*) malloc(sizeof(struct address_value)*numberItems);
 	checkpointer((void *)addressTable,__FILE__,"malloc","addressTable" ,__LINE__ -1 );
 		
-	if(!initBloomFilter(&bloom,numberItems))
+   if(!initBloomFilterMapped(&bloom,numberItems))
 		return false;
 
 	i = 0;
@@ -6406,7 +6425,7 @@ bool forceReadFileAddressEth(char *fileName)	{
 	checkpointer((void *)addressTable,__FILE__,"malloc","addressTable" ,__LINE__ -1 );
 	
 	
-	if(!initBloomFilter(&bloom,N))
+   if(!initBloomFilterMapped(&bloom,N))
 		return false;
 	
 	i = 0;
@@ -6486,7 +6505,7 @@ bool forceReadFileXPoint(char *fileName)	{
 	
 	N = numberItems;
 	
-	if(!initBloomFilter(&bloom,N))
+   if(!initBloomFilterMapped(&bloom,N))
 		return false;
 	
 	i= 0;
@@ -6571,8 +6590,24 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)	{
 			r = false;
 		}
 	}
-	printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
-	return r;
+        printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+        return r;
+}
+
+bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom) {
+        if(FLAGMAPPED) {
+                bool r = true;
+                printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
+                const char *fname = mapped_filename ? mapped_filename : "bloom.dat";
+                uint64_t total = (items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom;
+                if(bloom_init_mmap(bloom_arg,total,0.000001,fname) == 1){
+                        fprintf(stderr,"[E] error bloom_init_mmap for %" PRIu64 " elements.\n",items_bloom);
+                        r = false;
+                }
+                printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                return r;
+        }
+        return initBloomFilter(bloom_arg,items_bloom);
 }
 
 void writeFileIfNeeded(const char *fileName)	{
