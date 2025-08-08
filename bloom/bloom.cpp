@@ -347,7 +347,13 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
     return 1;
   }
   close(fd);
-  memset(bloom->bf, 0, bloom->bytes);
+  /*
+   * Avoid touching the whole mapped region up front.  ftruncate() ensures the
+   * file is logically filled with zeros so we can skip the explicit memset.
+   * This allows creating bloom filters that are larger than the available
+   * RAM because the kernel will allocate pages on demand as they are
+   * accessed.
+   */
 
   bloom->ready = 1;
   bloom->major = BLOOM_VERSION_MAJOR;
