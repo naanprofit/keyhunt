@@ -342,21 +342,31 @@ int bloom_load(struct bloom * bloom, char * filename)
     goto load_error;
   }
 
-  if (bloom->mapped_chunks > 1) {
-    bloom->bf_chunks = (uint8_t**)calloc(bloom->mapped_chunks, sizeof(uint8_t*));
-    if (!bloom->bf_chunks) { rv = 10; goto load_error; }
-    for (uint32_t i = 0; i < bloom->mapped_chunks; i++) {
-      uint64_t cbytes = (i == bloom->mapped_chunks - 1) ? bloom->last_chunk_bytes : bloom->chunk_bytes;
-      char fname[1024];
-      snprintf(fname, sizeof(fname), "%s.%u", filename, i);
-      int cfd = open(fname, O_RDWR);
-      if (cfd < 0) { rv = 11; goto load_error_chunks; }
-      uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
+  if (bloom->mapped_chunks >= 1) {
+    if (bloom->mapped_chunks > 1) {
+      bloom->bf_chunks = (uint8_t**)calloc(bloom->mapped_chunks, sizeof(uint8_t*));
+      if (!bloom->bf_chunks) { rv = 10; goto load_error; }
+      for (uint32_t i = 0; i < bloom->mapped_chunks; i++) {
+        uint64_t cbytes = (i == bloom->mapped_chunks - 1) ? bloom->last_chunk_bytes : bloom->chunk_bytes;
+        char fname[1024];
+        snprintf(fname, sizeof(fname), "%s.%u", filename, i);
+        int cfd = open(fname, O_RDWR);
+        if (cfd < 0) { rv = 11; goto load_error_chunks; }
+        uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
+        close(cfd);
+        if (map == MAP_FAILED) { rv = 12; goto load_error_chunks; }
+        bloom->bf_chunks[i] = map;
+      }
+      bloom->bf = bloom->bf_chunks[0];
+    } else {
+      off_t offset = strlen(BLOOM_MAGIC) + sizeof(uint16_t) + sizeof(struct bloom);
+      int cfd = open(filename, O_RDWR);
+      if (cfd < 0) { rv = 11; goto load_error; }
+      uint8_t *map = (uint8_t*)mmap(NULL, bloom->bytes, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, offset);
       close(cfd);
-      if (map == MAP_FAILED) { rv = 12; goto load_error_chunks; }
-      bloom->bf_chunks[i] = map;
+      if (map == MAP_FAILED) { rv = 12; goto load_error; }
+      bloom->bf = map;
     }
-    bloom->bf = bloom->bf_chunks[0];
   } else {
     bloom->bf = (unsigned char *)malloc(bloom->bytes);
     if (bloom->bf == NULL) { rv = 10; goto load_error; }        // LCOV_EXCL_LINE
@@ -524,7 +534,7 @@ void bloom_unmap(struct bloom *bloom)
     free(bloom->bf_chunks);
     bloom->bf_chunks = NULL;
     bloom->bf = NULL;
-  } else if (bloom->bf && bloom->bytes) {
+  } else if (bloom->mapped_chunks >= 1 && bloom->bf && bloom->bytes) {
     munmap(bloom->bf, bloom->bytes);
     bloom->bf = NULL;
   }
