@@ -190,7 +190,7 @@ int bloom_reset(struct bloom * bloom);
  *     1 - on failure
  *
  */
-//int bloom_save(struct bloom * bloom, char * filename);
+int bloom_save(struct bloom * bloom, char * filename);
 
 
 /** ***************************************************************************
@@ -208,7 +208,7 @@ int bloom_reset(struct bloom * bloom);
  *     > 0 - on failure
  *
  */
-//int bloom_load(struct bloom * bloom, char * filename);
+int bloom_load(struct bloom * bloom, char * filename);
 
 
 /** ***************************************************************************
