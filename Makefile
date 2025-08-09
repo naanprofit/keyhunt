@@ -1,7 +1,7 @@
 ARCH := $(shell uname -m)
 
 ifeq ($(ARCH),aarch64)
-ARCH_FLAGS := -march=armv8-a -mtune=generic
+ARCH_FLAGS := -march=armv8-a -mtune=generic -U__SSE2__
 HASH_OBJS := hash/ripemd160.o hash/sha256.o hash/ripemd160_neon.o hash/sha256_neon.o
 else
 ARCH_FLAGS := -m64 -march=native -mtune=native -mssse3
