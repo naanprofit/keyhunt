@@ -2,7 +2,7 @@ ARCH := $(shell uname -m)
 
 ifeq ($(ARCH),aarch64)
 ARCH_FLAGS := -march=armv8-a -mtune=generic
-HASH_OBJS := hash/ripemd160.o hash/sha256.o
+HASH_OBJS := hash/ripemd160.o hash/sha256.o hash/ripemd160_neon.o hash/sha256_neon.o
 else
 ARCH_FLAGS := -m64 -march=native -mtune=native -mssse3
 HASH_OBJS := hash/ripemd160.o hash/sha256.o hash/ripemd160_sse.o hash/sha256_sse.o
@@ -30,7 +30,10 @@ default:
 >g++ $(CXXFLAGS) -flto -c secp256k1/IntGroup.cpp -o IntGroup.o
 >g++ $(CXXFLAGS) -flto -c hash/ripemd160.cpp -o hash/ripemd160.o
 >g++ $(CXXFLAGS) -flto -c hash/sha256.cpp -o hash/sha256.o
-ifneq ($(ARCH),aarch64)
+ifeq ($(ARCH),aarch64)
+>g++ $(CXXFLAGS) -flto -c hash/ripemd160_neon.cpp -o hash/ripemd160_neon.o
+>g++ $(CXXFLAGS) -flto -c hash/sha256_neon.cpp -o hash/sha256_neon.o
+else
 >g++ $(CXXFLAGS) -flto -c hash/ripemd160_sse.cpp -o hash/ripemd160_sse.o
 >g++ $(CXXFLAGS) -flto -c hash/sha256_sse.cpp -o hash/sha256_sse.o
 endif
@@ -75,7 +78,10 @@ bsgsd:
 >g++ $(CXXFLAGS) -flto -c secp256k1/IntGroup.cpp -o IntGroup.o
 >g++ $(CXXFLAGS) -flto -c hash/ripemd160.cpp -o hash/ripemd160.o
 >g++ $(CXXFLAGS) -flto -c hash/sha256.cpp -o hash/sha256.o
-ifneq ($(ARCH),aarch64)
+ifeq ($(ARCH),aarch64)
+>g++ $(CXXFLAGS) -flto -c hash/ripemd160_neon.cpp -o hash/ripemd160_neon.o
+>g++ $(CXXFLAGS) -flto -c hash/sha256_neon.cpp -o hash/sha256_neon.o
+else
 >g++ $(CXXFLAGS) -flto -c hash/ripemd160_sse.cpp -o hash/ripemd160_sse.o
 >g++ $(CXXFLAGS) -flto -c hash/sha256_sse.cpp -o hash/sha256_sse.o
 endif

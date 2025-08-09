@@ -615,8 +615,8 @@ void Secp256K1::GetHash160(int type,bool compressed,
       KEYBUFFUNCOMP(b2, k2);
       KEYBUFFUNCOMP(b3, k3);
 
-      sha256sse_2B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
-      ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+      sha256_simd_2B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
+      ripemd160_simd_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
 
     } else {
 
@@ -630,8 +630,8 @@ void Secp256K1::GetHash160(int type,bool compressed,
       KEYBUFFCOMP(b2, k2);
       KEYBUFFCOMP(b3, k3);
 
-      sha256sse_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
-      ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+      sha256_simd_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
+      ripemd160_simd_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
 
     }
 
@@ -659,8 +659,8 @@ void Secp256K1::GetHash160(int type,bool compressed,
     KEYBUFFSCRIPT(b2, kh2);
     KEYBUFFSCRIPT(b3, kh3);
 
-    sha256sse_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
-    ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+    sha256_simd_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
+    ripemd160_simd_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
 
   }
   break;
@@ -773,8 +773,8 @@ void Secp256K1::GetHash160_fromX(int type,unsigned char prefix,
       KEYBUFFPREFIX(b2, k2, prefix);
       KEYBUFFPREFIX(b3, k3, prefix);
 
-      sha256sse_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
-      ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+      sha256_simd_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
+      ripemd160_simd_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
   }
   break;
 
