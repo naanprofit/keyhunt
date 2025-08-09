@@ -48,6 +48,16 @@ sequential chunk files (e.g. `bloom.dat.0`, `bloom.dat.1`, ...). Use
 without starting a search. Without `--mapped`, keyhunt will keep the bloom filter
 in memory and will warn if it does not fit in the available RAM.
 
+### Memory mapped bP table
+
+The BSGS stage uses a bP table that can consume large amounts of RAM. If the
+required size exceeds the available physical memory, or when `--mapped` is
+supplied, keyhunt stores this table in a temporary file and maps it into
+memory.  `--ptable[=file]` selects the backing file path and
+`--ptable-size <size>` preallocates the file (accepting `K`, `M`, `G` and `T`
+suffixes).  The mapped table is flushed on shutdown and the temporary file is
+removed unless a path was explicitly provided.
+
 ## Free Code
 
 This code is free of charge, see the licence for more details. https://github.com/albertobsd/keyhunt/blob/main/LICENSE
