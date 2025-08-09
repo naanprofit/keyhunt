@@ -310,6 +310,7 @@ int bptable_fd = -1;
 uint64_t bptable_bytes = 0;
 int FLAGBPTABLEMAPPED = 0;
 char bptable_tmpfile[4096];
+const char *tmpdir_path = NULL;
 
 
 int FLAGSTRIDE = 0;
@@ -510,6 +511,7 @@ int main(int argc, char **argv)	{
                {"mapped", optional_argument, 0, 0},
                {"ptable", optional_argument, 0, 0},
                {"ptable-size", required_argument, 0, 0},
+               {"tmpdir", required_argument, 0, 0},
                {0, 0, 0, 0}
        };
 
@@ -536,6 +538,8 @@ int main(int argc, char **argv)	{
                                        }
                                }
                                bptable_size_override = desired;
+                       } else if(strcmp(long_options[option_index].name,"tmpdir") == 0){
+                               tmpdir_path = optarg;
                        }
                        continue;
                }
@@ -1455,7 +1459,12 @@ int main(int argc, char **argv)	{
                        if(fname){
                                bptable_fd = open(fname,O_RDWR | O_CREAT,0600);
                        }else{
-                               strcpy(bptable_tmpfile,"/tmp/bptableXXXXXX");
+                               const char *tmp = tmpdir_path;
+                               if(!tmp || !*tmp) tmp = getenv("TMPDIR");
+                               if(!tmp || !*tmp) tmp = getenv("TEMP");
+                               if(!tmp || !*tmp) tmp = getenv("TMP");
+                               if(!tmp || !*tmp) tmp = "/tmp";
+                               snprintf(bptable_tmpfile,sizeof(bptable_tmpfile),"%s/bptableXXXXXX",tmp);
                                bptable_fd = mkstemp(bptable_tmpfile);
                        }
                        if(bptable_fd < 0){
@@ -6164,6 +6173,7 @@ void menu() {
        printf("--mapped    Force use of a memory-mapped file for bP table\n");
        printf("--ptable[=file]   Path to backing file for mapped bP table\n");
        printf("--ptable-size sz  Preallocate sz bytes for mapped bP table (supports K/M/G/T)\n");
+       printf("--tmpdir dir     Directory for temporary files\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
         printf("\nExample:\n\n");
