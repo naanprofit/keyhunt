@@ -34,30 +34,59 @@
 #define BLOOM_VERSION_MAJOR 2
 #define BLOOM_VERSION_MINOR 201
 
-inline static int test_bit_set_bit(uint8_t *bf, uint64_t bit, int set_bit)
+inline static int test_bit_set_bit(struct bloom *bloom, uint64_t bit, int set_bit)
 {
   uint64_t byte = bit >> 3;
-  uint8_t c = bf[byte];	 // expensive memory access
-  uint8_t mask = 1 << (bit % 8);
-  if (c & mask) {
-    return 1;
-  } else {
-    if (set_bit) {
-		bf[byte] = c | mask;
+  if (bloom->mapped_chunks > 1 && bloom->bf_chunks) {
+    uint64_t chunk = byte / bloom->chunk_bytes;
+    uint64_t offset = byte % bloom->chunk_bytes;
+    uint8_t *bf = bloom->bf_chunks[chunk];
+    uint8_t c = bf[offset];
+    uint8_t mask = 1 << (bit % 8);
+    if (c & mask) {
+      return 1;
+    } else {
+      if (set_bit) {
+        bf[offset] = c | mask;
+      }
+      return 0;
     }
-    return 0;
+  } else {
+    uint8_t *bf = bloom->bf;
+    uint8_t c = bf[byte];
+    uint8_t mask = 1 << (bit % 8);
+    if (c & mask) {
+      return 1;
+    } else {
+      if (set_bit) {
+        bf[byte] = c | mask;
+      }
+      return 0;
+    }
   }
 }
 
-inline static int test_bit(uint8_t *bf, uint64_t bit)
+inline static int test_bit(struct bloom *bloom, uint64_t bit)
 {
   uint64_t byte = bit >> 3;
-  uint8_t c = bf[byte];	 // expensive memory access
-  uint8_t mask = 1 << (bit % 8);
-  if (c & mask) {
-    return 1;
+  if (bloom->mapped_chunks > 1 && bloom->bf_chunks) {
+    uint64_t chunk = byte / bloom->chunk_bytes;
+    uint64_t offset = byte % bloom->chunk_bytes;
+    uint8_t c = bloom->bf_chunks[chunk][offset];
+    uint8_t mask = 1 << (bit % 8);
+    if (c & mask) {
+      return 1;
+    } else {
+      return 0;
+    }
   } else {
-    return 0;
+    uint8_t c = bloom->bf[byte];
+    uint8_t mask = 1 << (bit % 8);
+    if (c & mask) {
+      return 1;
+    } else {
+      return 0;
+    }
   }
 }
 
@@ -74,7 +103,7 @@ static int bloom_check_add(struct bloom * bloom, const void * buffer, int len, i
   uint8_t i;
   for (i = 0; i < bloom->hashes; i++) {
     x = (a + b*i) % bloom->bits;
-    if (test_bit_set_bit(bloom->bf, x, add)) {
+    if (test_bit_set_bit(bloom, x, add)) {
       hits++;
     } else if (!add) {
       // Don't care about the presence of all the bits. Just our own.
@@ -141,7 +170,7 @@ int bloom_check(struct bloom * bloom, const void * buffer, int len)
   uint8_t i;
   for (i = 0; i < bloom->hashes; i++) {
     x = (a + b*i) % bloom->bits;
-    if (test_bit(bloom->bf, x)) {
+    if (test_bit(bloom, x)) {
       hits++;
     } else {
       return 0;
@@ -177,6 +206,10 @@ void bloom_print(struct bloom * bloom)
 
 void bloom_free(struct bloom * bloom)
 {
+  if (bloom->mapped_chunks) {
+    bloom_unmap(bloom);
+    return;
+  }
   if (bloom->ready) {
     free(bloom->bf);
   }
@@ -186,7 +219,14 @@ void bloom_free(struct bloom * bloom)
 int bloom_reset(struct bloom * bloom)
 {
   if (!bloom->ready) return 1;
-  memset(bloom->bf, 0, bloom->bytes);
+  if (bloom->mapped_chunks > 1 && bloom->bf_chunks) {
+    for (uint32_t i = 0; i < bloom->mapped_chunks; i++) {
+      uint64_t cbytes = (i == bloom->mapped_chunks - 1) ? bloom->last_chunk_bytes : bloom->chunk_bytes;
+      memset(bloom->bf_chunks[i], 0, cbytes);
+    }
+  } else {
+    memset(bloom->bf, 0, bloom->bytes);
+  }
   return 0;
 }
 /*
@@ -312,7 +352,7 @@ const char * bloom_version()
  * requested number of entries. If the file exists with a different size and
  * @resize is zero, an error is returned and no mapping occurs.
  */
-int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename, int resize)
+int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename, int resize, uint32_t chunks)
 {
   memset(bloom, 0, sizeof(struct bloom));
   if (entries < 1000 || error <= 0 || error >= 1) {
@@ -337,46 +377,77 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
 
   bloom->hashes = (uint8_t)ceil(0.693147180559945 * bloom->bpe); // ln(2)
 
-  struct stat st;
-  int fd;
-  int file_exists = (stat(filename, &st) == 0);
+  if (chunks < 1) {
+    chunks = 1;
+  }
+  bloom->mapped_chunks = chunks;
+  bloom->chunk_bytes = (chunks > 1) ? bloom->bytes / chunks : bloom->bytes;
+  bloom->last_chunk_bytes = bloom->bytes - bloom->chunk_bytes * (chunks - 1);
 
-  if (file_exists) {
-    fd = open(filename, O_RDWR);
-    if (fd < 0) {
+  if (chunks > 1) {
+    bloom->bf_chunks = (uint8_t**)calloc(chunks, sizeof(uint8_t*));
+    if (!bloom->bf_chunks) {
       return 1;
     }
-    if ((uint64_t)st.st_size != bloom->bytes) {
-      if (resize) {
-        if (ftruncate(fd, bloom->bytes) != 0) {
+  }
+
+  struct stat st;
+  int fd;
+  for (uint32_t i = 0; i < chunks; i++) {
+    uint64_t cbytes = (i == chunks - 1) ? bloom->last_chunk_bytes : bloom->chunk_bytes;
+    char fname[1024];
+    if (chunks > 1) {
+      snprintf(fname, sizeof(fname), "%s.%u", filename, i);
+    } else {
+      snprintf(fname, sizeof(fname), "%s", filename);
+    }
+
+    int file_exists = (stat(fname, &st) == 0);
+    if (file_exists) {
+      fd = open(fname, O_RDWR);
+      if (fd < 0) {
+        return 1;
+      }
+      if ((uint64_t)st.st_size != cbytes) {
+        if (resize) {
+          if (ftruncate(fd, cbytes) != 0) {
+            close(fd);
+            return 1;
+          }
+        } else {
+          fprintf(stderr, "bloom_init_mmap: file '%s' size %lld does not match expected %llu\n",
+                  fname, (long long)st.st_size, (unsigned long long)cbytes);
           close(fd);
           return 1;
         }
-      } else {
-        fprintf(stderr, "bloom_init_mmap: file '%s' size %lld does not match expected %llu\n",
-                filename, (long long)st.st_size, (unsigned long long)bloom->bytes);
+      }
+    } else {
+      fd = open(fname, O_RDWR | O_CREAT, 0644);
+      if (fd < 0) {
+        return 1;
+      }
+      if (ftruncate(fd, cbytes) != 0) {
         close(fd);
         return 1;
       }
     }
-  } else {
-    fd = open(filename, O_RDWR | O_CREAT, 0644);
-    if (fd < 0) {
-      return 1;
-    }
-    if (ftruncate(fd, bloom->bytes) != 0) {
+
+    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
       close(fd);
       return 1;
     }
+    close(fd);
+    if (chunks > 1) {
+      bloom->bf_chunks[i] = map;
+    } else {
+      bloom->bf = map;
+    }
   }
 
-  bloom->bf = (uint8_t*)mmap(NULL, bloom->bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  if (bloom->bf == MAP_FAILED) {
-    bloom->bf = NULL;
-    close(fd);
-    return 1;
+  if (chunks > 1) {
+    bloom->bf = bloom->bf_chunks[0];
   }
-  close(fd);
 
   bloom->ready = 1;
   bloom->major = BLOOM_VERSION_MAJOR;
@@ -386,17 +457,28 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
 
 void bloom_unmap(struct bloom *bloom)
 {
-  if (bloom->bf && bloom->bytes) {
+  if (bloom->mapped_chunks > 1 && bloom->bf_chunks) {
+    for (uint32_t i = 0; i < bloom->mapped_chunks; i++) {
+      uint64_t cbytes = (i == bloom->mapped_chunks - 1) ? bloom->last_chunk_bytes : bloom->chunk_bytes;
+      if (bloom->bf_chunks[i] && cbytes) {
+        munmap(bloom->bf_chunks[i], cbytes);
+      }
+    }
+    free(bloom->bf_chunks);
+    bloom->bf_chunks = NULL;
+    bloom->bf = NULL;
+  } else if (bloom->bf && bloom->bytes) {
     munmap(bloom->bf, bloom->bytes);
     bloom->bf = NULL;
   }
   bloom->ready = 0;
 }
 #else
-int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename, int resize)
+int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, const char *filename, int resize, uint32_t chunks)
 {
   (void)filename;
   (void)resize;
+  (void)chunks;
   return bloom_init2(bloom, entries, error);
 }
 
