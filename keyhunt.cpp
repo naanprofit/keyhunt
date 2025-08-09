@@ -5966,7 +5966,7 @@ void sha256sse_22(uint8_t *src0, uint8_t *src1, uint8_t *src2, uint8_t *src3, ui
   BUFFMINIKEY(b1, src1);
   BUFFMINIKEY(b2, src2);
   BUFFMINIKEY(b3, src3);
-  sha256sse_1B(b0, b1, b2, b3, dst0, dst1, dst2, dst3);
+  sha256_simd_1B(b0, b1, b2, b3, dst0, dst1, dst2, dst3);
 }
 
 
@@ -5997,7 +5997,7 @@ void sha256sse_23(uint8_t *src0, uint8_t *src1, uint8_t *src2, uint8_t *src3, ui
   BUFFMINIKEYCHECK(b1, src1);
   BUFFMINIKEYCHECK(b2, src2);
   BUFFMINIKEYCHECK(b3, src3);
-  sha256sse_1B(b0, b1, b2, b3, dst0, dst1, dst2, dst3);
+  sha256_simd_1B(b0, b1, b2, b3, dst0, dst1, dst2, dst3);
 }
 
 void menu() {
