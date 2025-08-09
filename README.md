@@ -40,9 +40,10 @@ Use `--mapped[=file]` to create or use a file backed bloom filter. The optional
 creating the mapped file. `--bloom-bytes <size>` lets you request an approximate
 on-disk size directly, choosing the closest valid number of entries and hash
 functions. `--mapped-chunks <n>` splits the filter across `n` sequential chunk
-files (e.g. `bloom.dat.0`, `bloom.dat.1`, ...). Without `--mapped`, keyhunt will
-keep the bloom filter in memory and will warn if it does not fit in the available
-RAM.
+files (e.g. `bloom.dat.0`, `bloom.dat.1`, ...). Use `--create-mapped[=size]` to
+preallocate and zero a mapped bloom filter file without starting a search. Without
+`--mapped`, keyhunt will keep the bloom filter in memory and will warn if it does
+not fit in the available RAM.
 
 ## Free Code
 

@@ -296,6 +296,7 @@ int FLAGDEBUG = 0;
 int FLAGQUIET = 0;
 int FLAGMATRIX = 0;
 int FLAGMAPPED = 0;
+int FLAGCREATEMAPPED = 0;
 const char *mapped_filename = NULL;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
@@ -508,6 +509,7 @@ int main(int argc, char **argv)	{
               {"mapped-size", required_argument, 0, 0},
               {"mapped-chunks", required_argument, 0, 0},
               {"bloom-bytes", required_argument, 0, 0},
+              {"create-mapped", optional_argument, 0, 0},
               {0, 0, 0, 0}
       };
 
@@ -531,6 +533,16 @@ int main(int argc, char **argv)	{
                               bloom_entries_for_bytes(desired, &n, &k);
                               mapped_entries_override = n;
                               mapped_error_override = powl(0.5L, (long double)k);
+                      } else if (strcmp(long_options[option_index].name, "create-mapped") == 0) {
+                              FLAGMAPPED = 1;
+                              FLAGCREATEMAPPED = 1;
+                              if (optarg) {
+                                      uint64_t desired = strtoull(optarg, NULL, 10);
+                                      uint64_t n; uint32_t k;
+                                      bloom_entries_for_bytes(desired, &n, &k);
+                                      mapped_entries_override = n;
+                                      mapped_error_override = powl(0.5L, (long double)k);
+                              }
                       }
                       continue;
               }
@@ -822,8 +834,48 @@ int main(int argc, char **argv)	{
 				exit(EXIT_FAILURE);
 			break;
 		}
-	}
-	
+        }
+
+        if (FLAGCREATEMAPPED) {
+                if (!mapped_entries_override) {
+                        fprintf(stderr, "[E] --create-mapped requires size via argument or --bloom-bytes\n");
+                        exit(EXIT_FAILURE);
+                }
+                const char *mapname = mapped_filename ? mapped_filename : "bloom.dat";
+                uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
+                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
+                struct bloom tmp;
+                if (bloom_init_mmap(&tmp, mapped_entries_override, error, mapname, 1, chunks) == 1) {
+                        fprintf(stderr, "[E] error bloom_init_mmap for %" PRIu64 " elements.\n", mapped_entries_override);
+                        exit(EXIT_FAILURE);
+                }
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                if (tmp.mapped_chunks > 1 && tmp.bf_chunks) {
+                        for (uint32_t i = 0; i < tmp.mapped_chunks; i++) {
+                                uint64_t cbytes = (i == tmp.mapped_chunks - 1) ? tmp.last_chunk_bytes : tmp.chunk_bytes;
+                                memset(tmp.bf_chunks[i], 0, cbytes);
+                                FlushViewOfFile(tmp.bf_chunks[i], cbytes);
+                        }
+                } else {
+                        memset(tmp.bf, 0, tmp.bytes);
+                        FlushViewOfFile(tmp.bf, tmp.bytes);
+                }
+#else
+                if (tmp.mapped_chunks > 1 && tmp.bf_chunks) {
+                        for (uint32_t i = 0; i < tmp.mapped_chunks; i++) {
+                                uint64_t cbytes = (i == tmp.mapped_chunks - 1) ? tmp.last_chunk_bytes : tmp.chunk_bytes;
+                                memset(tmp.bf_chunks[i], 0, cbytes);
+                                msync(tmp.bf_chunks[i], cbytes, MS_SYNC);
+                        }
+                } else {
+                        memset(tmp.bf, 0, tmp.bytes);
+                        msync(tmp.bf, tmp.bytes, MS_SYNC);
+                }
+#endif
+                bloom_unmap(&tmp);
+                return 0;
+        }
+
         uint64_t nk_n = 0x100000000000ULL;
         if(FLAG_N) {
                 if(str_N[0] == '0' && (str_N[1] == 'x' || str_N[1] == 'X')) {
@@ -5864,6 +5916,7 @@ void menu() {
         printf("--mapped-size n   Reserve space for n entries in the mapped bloom file\n");
         printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
+       printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
         printf("\nExample:\n\n");
