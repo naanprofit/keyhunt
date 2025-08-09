@@ -31,6 +31,7 @@ email: albertobsd@gmail.com
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/random.h>
+#include <sys/mman.h>
 #endif
 
 #ifdef __unix__
@@ -6439,23 +6440,56 @@ bool readFileAddress(char *fileName)	{
 				fclose(fileDescriptor);
 				return false;
 			}
-			
-			printf("[+] Bloom filter for %" PRIu64 " elements.\n",bloom.entries);
-			
-			bloom.bf = (uint8_t*) malloc(bloom.bytes);
-			if(bloom.bf == NULL)	{
-				fprintf(stderr,"[E] Error allocating memory, code line %i\n",__LINE__ - 2);
-				fclose(fileDescriptor);
-				return false;
-			}
+	printf("[+] Bloom filter for %" PRIu64 " elements.\n",bloom.entries);
 
-			//read bloom filter data
-			bytesRead = fread(bloom.bf,1,bloom.bytes,fileDescriptor);
-			if(bytesRead != bloom.bytes)	{
-				fprintf(stderr,"[E] Error reading file, code line %i\n",__LINE__ - 2);
-				fclose(fileDescriptor);
-				return false;
-			}
+#if defined(_WIN64) && !defined(__CYGWIN__)
+	bloom.bf = (uint8_t*) malloc(bloom.bytes);
+	if(bloom.bf == NULL)    {
+		fprintf(stderr,"[E] Error allocating memory, code line %i\n",__LINE__ - 2);
+		fclose(fileDescriptor);
+		return false;
+	}
+
+	//read bloom filter data
+	bytesRead = fread(bloom.bf,1,bloom.bytes,fileDescriptor);
+	if(bytesRead != bloom.bytes)    {
+		fprintf(stderr,"[E] Error reading file, code line %i\n",__LINE__ - 2);
+		fclose(fileDescriptor);
+		return false;
+	}
+#else
+	int fd = fileno(fileDescriptor);
+	off_t offset = ftello(fileDescriptor);
+	long pagesize = sysconf(_SC_PAGE_SIZE);
+	off_t page_offset = offset & ~((off_t)pagesize - 1);
+	off_t delta = offset - page_offset;
+	size_t map_length = bloom.bytes + delta;
+	void *map = mmap(NULL, map_length, PROT_READ, MAP_PRIVATE, fd, page_offset);
+	if (map == MAP_FAILED) {
+		fprintf(stderr,"[E] Error mmapping file, code line %i\n",__LINE__ - 2);
+		fclose(fileDescriptor);
+		return false;
+	}
+	bloom.bf = (uint8_t*)map + delta;
+	bloom.bf_chunks = (uint8_t**)calloc(1, sizeof(uint8_t*));
+	if (!bloom.bf_chunks) {
+		fprintf(stderr,"[E] Error allocating memory, code line %i\n",__LINE__ - 2);
+		munmap(map, map_length);
+		fclose(fileDescriptor);
+		return false;
+	}
+	bloom.bf_chunks[0] = (uint8_t*)map;
+	bloom.mapped_chunks = 1;
+	bloom.chunk_bytes = map_length;
+	bloom.last_chunk_bytes = map_length;
+	if (fseeko(fileDescriptor, bloom.bytes, SEEK_CUR) != 0) {
+		fprintf(stderr,"[E] Error seeking file, code line %i\n",__LINE__ - 2);
+		munmap(map, map_length);
+		fclose(fileDescriptor);
+		return false;
+	}
+	bytesRead = bloom.bytes;
+#endif
 			if(FLAGSKIPCHECKSUM == 0){
 				
 				//calculate checksum of the current readed data
