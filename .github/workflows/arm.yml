@@ -1,0 +1,15 @@
+name: arm-build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  no-sse2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Compile xxhash without SSE2
+        run: aarch64-linux-gnu-gcc -I. -march=armv8-a -mtune=generic tests/no_sse2.c -c
