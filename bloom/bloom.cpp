@@ -524,7 +524,7 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
 
 void bloom_unmap(struct bloom *bloom)
 {
-  if (bloom->mapped_chunks > 1 && bloom->bf_chunks) {
+  if (bloom->mapped_chunks >= 1 && bloom->bf_chunks) {
     for (uint32_t i = 0; i < bloom->mapped_chunks; i++) {
       uint64_t cbytes = (i == bloom->mapped_chunks - 1) ? bloom->last_chunk_bytes : bloom->chunk_bytes;
       if (bloom->bf_chunks[i] && cbytes) {
