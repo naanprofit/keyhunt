@@ -409,6 +409,145 @@ const char * bloom_version()
 }
 
 #ifndef _WIN64
+static uint64_t bytes_for_entries_error(uint64_t entries, long double error) {
+  long double num = -log(error);
+  long double denom = 0.480453013918201L; // ln(2)^2
+  long double bpe = (num / denom);
+  long double allbits = (long double)entries * bpe;
+  uint64_t bits = (uint64_t)allbits;
+  uint64_t bytes = bits / 8;
+  if (bits % 8) {
+    bytes += 1;
+  }
+  return bytes;
+}
+
+static void entries_hashes_for_bytes(uint64_t bytes, uint64_t *entries, uint8_t *hashes) {
+  uint64_t best_n = 0;
+  uint32_t best_k = 0;
+  for (uint32_t bits = 20; bits <= 64; bits += 2) {
+    uint64_t n = 1ULL << bits;
+    uint32_t k = 1U << ((bits - 20) / 2);
+    long double error = powl(0.5L, (long double)k);
+    uint64_t need = bytes_for_entries_error(n, error);
+    if (need > bytes) {
+      break;
+    }
+    best_n = n;
+    best_k = k;
+  }
+  if (best_n == 0) {
+    best_n = 1ULL << 20;
+    best_k = 1;
+  }
+  if (entries) {
+    *entries = best_n;
+  }
+  if (hashes) {
+    *hashes = (uint8_t)best_k;
+  }
+}
+
+int bloom_load_mmap(struct bloom *bloom, const char *filename, uint32_t chunks)
+{
+  if (!bloom || !filename) {
+    return 1;
+  }
+  memset(bloom, 0, sizeof(struct bloom));
+  if (chunks < 1) {
+    chunks = 1;
+  }
+  bloom->mapped_chunks = chunks;
+
+  uint64_t total_bytes = 0;
+  uint64_t first_cbytes = 0;
+  uint64_t *sizes = NULL;
+  if (chunks > 1) {
+    bloom->bf_chunks = (uint8_t**)calloc(chunks, sizeof(uint8_t*));
+    sizes = (uint64_t*)calloc(chunks, sizeof(uint64_t));
+    if (!bloom->bf_chunks || !sizes) {
+      free(bloom->bf_chunks);
+      free(sizes);
+      return 1;
+    }
+  }
+
+  for (uint32_t i = 0; i < chunks; i++) {
+    char fname[1024];
+    if (chunks > 1) {
+      snprintf(fname, sizeof(fname), "%s.%u", filename, i);
+    } else {
+      snprintf(fname, sizeof(fname), "%s", filename);
+    }
+    int fd = open(fname, O_RDWR);
+    if (fd < 0) {
+      goto load_error;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+      close(fd);
+      goto load_error;
+    }
+    uint64_t cbytes = (uint64_t)st.st_size;
+    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) {
+      goto load_error;
+    }
+    if (chunks > 1) {
+      bloom->bf_chunks[i] = map;
+      sizes[i] = cbytes;
+      if (i == 0) {
+        bloom->chunk_bytes = cbytes;
+      }
+      if (i == chunks - 1) {
+        bloom->last_chunk_bytes = cbytes;
+      }
+    } else {
+      bloom->bf = map;
+      first_cbytes = cbytes;
+      bloom->chunk_bytes = cbytes;
+      bloom->last_chunk_bytes = cbytes;
+    }
+    total_bytes += cbytes;
+  }
+
+  if (chunks > 1) {
+    bloom->bf = bloom->bf_chunks[0];
+  }
+
+  bloom->bytes = total_bytes;
+  bloom->bits = bloom->bytes * 8;
+  entries_hashes_for_bytes(bloom->bytes, &bloom->entries, &bloom->hashes);
+  bloom->bpe = (double)bloom->bits / (double)bloom->entries;
+  bloom->error = powl(0.5L, (long double)bloom->hashes);
+  bloom->ready = 1;
+  bloom->major = BLOOM_VERSION_MAJOR;
+  bloom->minor = BLOOM_VERSION_MINOR;
+
+  if (sizes) {
+    free(sizes);
+  }
+  return 0;
+
+load_error:
+  if (chunks > 1) {
+    for (uint32_t j = 0; j < chunks; j++) {
+      if (bloom->bf_chunks && bloom->bf_chunks[j] && sizes && sizes[j]) {
+        munmap(bloom->bf_chunks[j], sizes[j]);
+      }
+    }
+    free(bloom->bf_chunks);
+    if (sizes) {
+      free(sizes);
+    }
+  } else if (bloom->bf && first_cbytes) {
+    munmap(bloom->bf, first_cbytes);
+  }
+  memset(bloom, 0, sizeof(struct bloom));
+  return 1;
+}
+
 /*
  * Initialize bloom filter backed by a memory mapped file. The resulting
  * bloom->bf points directly to the mapped region so the filter can be
@@ -561,6 +700,14 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
   (void)resize;
   (void)chunks;
   return bloom_init2(bloom, entries, error);
+}
+
+int bloom_load_mmap(struct bloom *bloom, const char *filename, uint32_t chunks)
+{
+  (void)bloom;
+  (void)filename;
+  (void)chunks;
+  return 1;
 }
 
 void bloom_unmap(struct bloom *bloom)

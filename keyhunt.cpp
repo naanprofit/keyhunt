@@ -40,6 +40,7 @@ email: albertobsd@gmail.com
 #include <sys/sysinfo.h>
 #include <sys/mman.h>
 #include <sys/statvfs.h>
+#include <sys/stat.h>
 #endif
 
 #ifdef __unix__
@@ -5928,7 +5929,7 @@ void menu() {
 	printf("-t tn       Threads number, must be a positive integer\n");
 	printf("-v value    Search for vanity Address, only with -m vanity\n");
         printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
-        printf("--mapped[=file]   Use a memory mapped bloom filter file instead of RAM\n");
+       printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
        printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
         printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
@@ -6865,6 +6866,26 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
                 const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
 
+                uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
+                if (!mapped_entries_override) {
+                        char fname_chk[1024];
+                        if (chunks > 1) {
+                                snprintf(fname_chk, sizeof(fname_chk), "%s.%u", mapname, 0);
+                        } else {
+                                snprintf(fname_chk, sizeof(fname_chk), "%s", mapname);
+                        }
+                        struct stat st;
+                        if (stat(fname_chk, &st) == 0) {
+                                if (bloom_load_mmap(bloom_arg, mapname, chunks) == 1) {
+                                        fprintf(stderr, "[E] bloom_load_mmap failed for '%s'\n", mapname);
+                                        r = false;
+                                } else {
+                                        printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                                }
+                                return r;
+                        }
+                }
+
                 uint64_t total;
                 if (mapped_entries_override && (!mapped_override_applied || items_bloom >= mapped_entries_override)) {
                         total = mapped_entries_override;
@@ -6875,7 +6896,6 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                         total = (items_bloom <= 10000) ? 10000 : FLAGBLOOMMULTIPLIER * items_bloom;
                 }
 
-               uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
                uint64_t need_bytes = bloom_bytes_for_entries_error(total, error);
                warn_if_insufficient_disk_space(mapname, need_bytes);
