@@ -6844,10 +6844,21 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
 
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname) {
         if(FLAGMAPPED) {
+                static bool mapped_override_applied = false;
                 bool r = true;
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
                 const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
-               uint64_t total = mapped_entries_override ? mapped_entries_override : ((items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom);
+
+                uint64_t total;
+                if (mapped_entries_override && (!mapped_override_applied || items_bloom >= mapped_entries_override)) {
+                        total = mapped_entries_override;
+                        if (!mapped_override_applied) {
+                                mapped_override_applied = true; // apply override only once by default
+                        }
+                } else {
+                        total = (items_bloom <= 10000) ? 10000 : FLAGBLOOMMULTIPLIER * items_bloom;
+                }
+
                uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
                uint64_t need_bytes = bloom_bytes_for_entries_error(total, error);
