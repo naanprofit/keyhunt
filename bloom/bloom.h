@@ -41,7 +41,11 @@ struct bloom
   uint8_t major;
   uint8_t minor;
   double bpe;
-  uint8_t *bf;
+    uint8_t *bf;
+    uint8_t **bf_chunks;
+    uint32_t mapped_chunks;
+    uint64_t chunk_bytes;
+    uint64_t last_chunk_bytes;
 };
 /*
 Customs
@@ -216,7 +220,7 @@ int bloom_reset(struct bloom * bloom);
 const char * bloom_version();
 
 /* Additional helpers for memory mapped bloom filters */
-int bloom_init_mmap(struct bloom * bloom, uint64_t entries, long double error, const char *filename, int resize);
+int bloom_init_mmap(struct bloom * bloom, uint64_t entries, long double error, const char *filename, int resize, uint32_t chunks);
 void bloom_unmap(struct bloom * bloom);
 
 #ifdef __cplusplus

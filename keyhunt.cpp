@@ -293,6 +293,7 @@ int FLAGMATRIX = 0;
 int FLAGMAPPED = 0;
 const char *mapped_filename = NULL;
 uint64_t mapped_entries_override = 0;
+uint32_t mapped_chunks = 1;
 int KFACTOR = 1;
 int MAXLENGTHADDRESS = -1;
 int NTHREADS = 1;
@@ -499,12 +500,13 @@ int main(int argc, char **argv)	{
       static struct option long_options[] = {
               {"mapped", optional_argument, 0, 0},
               {"mapped-size", required_argument, 0, 0},
+              {"mapped-chunks", required_argument, 0, 0},
               {0, 0, 0, 0}
       };
 
        while ((c = getopt_long(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, &option_index)) != -1) {
               if (c == 0) {
-                      if (strcmp(long_options[option_index].name, "mapped") == 0) {
+                    if (strcmp(long_options[option_index].name, "mapped") == 0) {
                               FLAGMAPPED = 1;
                               if (optarg) {
                                       mapped_filename = optarg;
@@ -512,6 +514,9 @@ int main(int argc, char **argv)	{
                       } else if (strcmp(long_options[option_index].name, "mapped-size") == 0) {
                               FLAGMAPPED = 1;
                               mapped_entries_override = strtoull(optarg, NULL, 10);
+                      } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
+                              FLAGMAPPED = 1;
+                              mapped_chunks = strtoul(optarg, NULL, 10);
                       }
                       continue;
               }
@@ -5823,6 +5828,7 @@ void menu() {
         printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
         printf("--mapped[=file]   Use a memory mapped bloom filter file instead of RAM\n");
         printf("--mapped-size n   Reserve space for n entries in the mapped bloom file\n");
+        printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
         printf("\nExample:\n\n");
 	printf("./keyhunt -m rmd160 -f tests/unsolvedpuzzles.rmd -b 66 -l compress -R -q -t 8\n\n");
 	printf("This line runs the program with 8 threads from the range 20000000000000000 to 40000000000000000 without stats output\n\n");
@@ -6687,7 +6693,7 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom) {
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
                 const char *fname = mapped_filename ? mapped_filename : "bloom.dat";
                 uint64_t total = mapped_entries_override ? mapped_entries_override : ((items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom);
-                if(bloom_init_mmap(bloom_arg,total,0.000001,fname, mapped_entries_override != 0) == 1){
+                if(bloom_init_mmap(bloom_arg,total,0.000001,fname, mapped_entries_override != 0, mapped_chunks) == 1){
                         fprintf(stderr,"[E] error bloom_init_mmap for %" PRIu64 " elements.\n",items_bloom);
                         r = false;
                 }
