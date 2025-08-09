@@ -125,6 +125,10 @@ First compile:
 make
 ```
 
+On ARM64 (`aarch64`) hosts the Makefile automatically sets `-march=armv8-a -mtune=generic`
+and uses the portable `hash/ripemd160.cpp` and `hash/sha256.cpp` implementations, skipping
+the SSE-specific sources.
+
 if you have problems compiling the `main` version you can compile the `legacy` version
 
 ```
