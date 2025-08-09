@@ -4,6 +4,12 @@
 #include <cstdint>
 #include <inttypes.h>
 
+#if defined(_WIN64) && !defined(__CYGWIN__)
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "util.h"
 
 
@@ -240,4 +246,21 @@ void print_nk_table(void) {
         printf("|   62 |   0x4000000000000000 | 2097152     |\n");
         printf("|   64 |  0x10000000000000000 | 4194304     |\n");
         printf("+------+----------------------+-------------+\n");
+}
+uint64_t get_total_ram(void){
+#if defined(_WIN64) && !defined(__CYGWIN__)
+    MEMORYSTATUSEX statex;
+    statex.dwLength = sizeof(statex);
+    if(GlobalMemoryStatusEx(&statex)){
+        return statex.ullTotalPhys;
+    }
+    return 0;
+#else
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    if(pages <= 0 || page_size <= 0){
+        return 0;
+    }
+    return (uint64_t)pages * (uint64_t)page_size;
+#endif
 }

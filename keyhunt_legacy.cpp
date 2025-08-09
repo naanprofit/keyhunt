@@ -12,6 +12,7 @@ email: albertobsd@gmail.com
 #include <vector>
 #include <inttypes.h>
 #include <errno.h>
+#include <ctype.h>
 #include "base58/libbase58.h"
 #include "oldbloom/oldbloom.h"
 #include "bloom/bloom.h"
@@ -1427,10 +1428,18 @@ int main(int argc, char **argv)	{
                printf("[+] Allocating %.2f MB for %" PRIu64  " bP Points\n",(double)(bytes/1048576),bsgs_m3);
 
                int use_mmap = FLAGMAPPED || bptable_filename != NULL || bptable_size_override != 0;
-               uint64_t avail = get_available_ram();
-               if(!use_mmap && avail && bytes > avail){
-                       fprintf(stderr,"[W] bP table of %.2f MB exceeds available RAM %.2f MB, using memory-mapped file.\n",(double)bytes/1048576.0,(double)avail/1048576.0);
-                       use_mmap = 1;
+               uint64_t total = get_total_ram();
+               if(!use_mmap && total && bytes > total){
+                       double need_mb = (double)bytes/1048576.0;
+                       double need_gb = (double)bytes/1073741824.0;
+                       double have_mb = (double)total/1048576.0;
+                       double have_gb = (double)total/1073741824.0;
+                       fprintf(stderr,
+                               "[E] bP table requires %.2f MB (%.2f GB) but system has %.2f MB (%.2f GB).\n",
+                               need_mb, need_gb, have_mb, have_gb);
+                       fprintf(stderr,
+                               "    Use smaller -n/-k values or the disk-backed bP table option (--ptable).\n");
+                       exit(EXIT_FAILURE);
                }
                if(use_mmap){
 #if defined(_WIN64) && !defined(__CYGWIN__)

@@ -34,4 +34,6 @@ void stringtokenizer(char *data,Tokenizer *t);
 int validate_nk(uint64_t n, uint64_t k);
 void print_nk_table(void);
 
+uint64_t get_total_ram(void);
+
 #endif // CUSTOMUTILH
