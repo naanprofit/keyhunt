@@ -686,12 +686,26 @@ int main(int argc, char **argv)	{
 			BSGS_AMP3[i].Reduce();
 		}
 
-		bytes = (uint64_t)bsgs_m3 * (uint64_t) sizeof(struct bsgs_xvalue);
-		printf("[+] Allocating %.2f MB for %" PRIu64  " bP Points\n",(double)(bytes/1048576),bsgs_m3);
-		
-		bPtable = (struct bsgs_xvalue*) malloc(bytes);
-		checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
-		memset(bPtable,0,bytes);
+                bytes = (uint64_t)bsgs_m3 * (uint64_t) sizeof(struct bsgs_xvalue);
+                printf("[+] Allocating %.2f MB for %" PRIu64  " bP Points\n",(double)(bytes/1048576),bsgs_m3);
+
+                uint64_t total = get_total_ram();
+                if(total && bytes > total){
+                        double need_mb = (double)bytes/1048576.0;
+                        double need_gb = (double)bytes/1073741824.0;
+                        double have_mb = (double)total/1048576.0;
+                        double have_gb = (double)total/1073741824.0;
+                        fprintf(stderr,
+                                "[E] bP table requires %.2f MB (%.2f GB) but system has %.2f MB (%.2f GB).\n",
+                                need_mb, need_gb, have_mb, have_gb);
+                        fprintf(stderr,
+                                "    Use smaller -n/-k values or the disk-backed bP table option (--ptable).\n");
+                        exit(EXIT_FAILURE);
+                }
+
+                bPtable = (struct bsgs_xvalue*) malloc(bytes);
+                checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
+                memset(bPtable,0,bytes);
 		
 		if(FLAGSAVEREADFILE)	{
 			/*Reading file for 1st bloom filter */
