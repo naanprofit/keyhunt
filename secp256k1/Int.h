@@ -217,9 +217,6 @@ static inline uint64_t __shiftleft128(uint64_t a, uint64_t b,unsigned char n) {
   __asm__("movq %1,%0;shldq %3,%2,%0;" : "=D"(c) : "r"(b),"r"(a),"c"(n));
   return c;
 }
-
-#define _subborrow_u64(a,b,c,d) __builtin_ia32_sbb_u64(a,b,c,(long long unsigned int*)d)
-#define _addcarry_u64(a,b,c,d) __builtin_ia32_addcarryx_u64(a,b,c,(long long unsigned int*)d)
 #define _byteswap_uint64 __builtin_bswap64
 #else
 #include <intrin.h>
@@ -239,6 +236,17 @@ static inline uint64_t __shiftleft128(uint64_t a, uint64_t b, unsigned char n) {
   return (uint64_t)(((unsigned __int128)b << n) | (a >> (64 - n)));
 }
 
+#define _byteswap_uint64 __builtin_bswap64
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+#ifndef _WIN64
+#define _addcarry_u64(a,b,c,d) __builtin_ia32_addcarryx_u64(a,b,c,(unsigned long long*)d)
+#define _subborrow_u64(a,b,c,d) __builtin_ia32_sbb_u64(a,b,c,(unsigned long long*)d)
+#else
+#include <intrin.h>
+#endif
+#else
 static inline unsigned char _addcarry_u64(unsigned char c, uint64_t a, uint64_t b, uint64_t *out) {
   unsigned __int128 sum = (unsigned __int128)a + b + c;
   *out = (uint64_t)sum;
@@ -251,8 +259,6 @@ static inline unsigned char _subborrow_u64(unsigned char c, uint64_t a, uint64_t
   *out = a - sub;
   return borrow;
 }
-
-#define _byteswap_uint64 __builtin_bswap64
 #endif
 
 static void inline imm_mul(uint64_t *x, uint64_t y, uint64_t *dst) {
