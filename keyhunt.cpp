@@ -844,9 +844,11 @@ int main(int argc, char **argv)	{
                 const char *mapname = mapped_filename ? mapped_filename : "bloom.dat";
                 uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
                 long double error = mapped_error_override ? mapped_error_override : 0.000001L;
+                uint64_t need_bytes = bloom_bytes_for_entries_error(mapped_entries_override, error);
                 struct bloom tmp;
                 if (bloom_init_mmap(&tmp, mapped_entries_override, error, mapname, 1, chunks) == 1) {
-                        fprintf(stderr, "[E] error bloom_init_mmap for %" PRIu64 " elements.\n", mapped_entries_override);
+                        fprintf(stderr, "[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",
+                                mapname, need_bytes, mapped_entries_override);
                         exit(EXIT_FAILURE);
                 }
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -6864,7 +6866,8 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                uint64_t need_bytes = bloom_bytes_for_entries_error(total, error);
                warn_if_insufficient_disk_space(mapname, need_bytes);
                if(bloom_init_mmap(bloom_arg,total,error,mapname, mapped_entries_override != 0, chunks) == 1){
-                        fprintf(stderr,"[E] error bloom_init_mmap for %" PRIu64 " elements.\n",items_bloom);
+                        fprintf(stderr,"[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",
+                                mapname, need_bytes, total);
                         r = false;
                 }
                 printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
