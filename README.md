@@ -36,14 +36,15 @@ You need to add `-t numberThreads` and `-k factor` to get better speed
 
 Keyhunt can store the bloom filter directly on disk so it can grow beyond available RAM.
 Use `--mapped[=file]` to create or use a file backed bloom filter. The optional
-`--mapped-size <entries>` flag reserves space for a specific number of entries when
-creating the mapped file. `--bloom-bytes <size>` lets you request an approximate
-on-disk size directly, choosing the closest valid number of entries and hash
-functions. `--mapped-chunks <n>` splits the filter across `n` sequential chunk
-files (e.g. `bloom.dat.0`, `bloom.dat.1`, ...). Use `--create-mapped[=size]` to
-preallocate and zero a mapped bloom filter file without starting a search. Without
-`--mapped`, keyhunt will keep the bloom filter in memory and will warn if it does
-not fit in the available RAM.
+`--mapped-size <size>` flag reserves space for a mapped bloom filter file of the
+given size in bytes. Suffixes `K`, `M`, `G`, and `T` are supported, and the size
+is converted to a number of entries internally. `--bloom-bytes <size>` lets you
+request an approximate on-disk size directly, choosing the closest valid number
+of entries and hash functions. `--mapped-chunks <n>` splits the filter across `n`
+sequential chunk files (e.g. `bloom.dat.0`, `bloom.dat.1`, ...). Use
+`--create-mapped[=size]` to preallocate and zero a mapped bloom filter file
+without starting a search. Without `--mapped`, keyhunt will keep the bloom filter
+in memory and will warn if it does not fit in the available RAM.
 
 ## Free Code
 
