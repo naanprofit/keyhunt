@@ -1,6 +1,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
+#include <inttypes.h>
 
 #include "util.h"
 
@@ -174,5 +176,68 @@ int isValidHex(char *data)	{
 		c = data[i];
 		valid = ( (c >= '0' && c <='9') || (c >= 'A' && c <='F' ) || (c >= 'a' && c <='f' ) );
 	}
-	return valid;
+        return valid;
+}
+
+int validate_nk(uint64_t n, uint64_t k) {
+        if(n < (1ULL << 20)) {
+                fprintf(stderr,"[E] n must be at least 2^20 (0x100000)\n");
+                return 0;
+        }
+        if(n & (n - 1)) {
+                fprintf(stderr,"[E] n must be a power of two\n");
+                return 0;
+        }
+        static const struct { int bits; uint64_t k; } table[] = {
+                {20,1},{22,2},{24,4},{26,8},{28,16},{30,32},{32,64},{34,128},{36,256},
+                {38,512},{40,1024},{42,2048},{44,4096},{46,8192},{48,16384},{50,32768},
+                {52,65536},{54,131072},{56,262144},{58,524288},{60,1048576},{62,2097152},{64,4194304}
+        };
+        int bits = 0;
+        uint64_t tmp = n;
+        while(tmp > 1) {
+                tmp >>= 1;
+                bits++;
+        }
+        for(unsigned int i=0; i<sizeof(table)/sizeof(table[0]); i++) {
+                if(table[i].bits == bits) {
+                        if(k > table[i].k) {
+                                fprintf(stderr,"[E] k value %" PRIu64 " is too large for n 0x%" PRIx64 " (max %" PRIu64 ")\n",k,n,table[i].k);
+                                return 0;
+                        }
+                        return 1;
+                }
+        }
+        fprintf(stderr,"[E] invalid n 0x%" PRIx64 "\n",n);
+        return 0;
+}
+
+void print_nk_table(void) {
+        printf("+------+----------------------+-------------+\n");
+        printf("| bits |  n in hexadecimal    | k max value |\n");
+        printf("+------+----------------------+-------------+\n");
+        printf("|   20 |             0x100000 | 1 (default) |\n");
+        printf("|   22 |             0x400000 | 2           |\n");
+        printf("|   24 |            0x1000000 | 4           |\n");
+        printf("|   26 |            0x4000000 | 8           |\n");
+        printf("|   28 |           0x10000000 | 16          |\n");
+        printf("|   30 |           0x40000000 | 32          |\n");
+        printf("|   32 |          0x100000000 | 64          |\n");
+        printf("|   34 |          0x400000000 | 128         |\n");
+        printf("|   36 |         0x1000000000 | 256         |\n");
+        printf("|   38 |         0x4000000000 | 512         |\n");
+        printf("|   40 |        0x10000000000 | 1024        |\n");
+        printf("|   42 |        0x40000000000 | 2048        |\n");
+        printf("|   44 |       0x100000000000 | 4096        |\n");
+        printf("|   46 |       0x400000000000 | 8192        |\n");
+        printf("|   48 |      0x1000000000000 | 16384       |\n");
+        printf("|   50 |      0x4000000000000 | 32768       |\n");
+        printf("|   52 |     0x10000000000000 | 65536       |\n");
+        printf("|   54 |     0x40000000000000 | 131072      |\n");
+        printf("|   56 |    0x100000000000000 | 262144      |\n");
+        printf("|   58 |    0x400000000000000 | 524288      |\n");
+        printf("|   60 |   0x1000000000000000 | 1048576     |\n");
+        printf("|   62 |   0x4000000000000000 | 2097152     |\n");
+        printf("|   64 |  0x10000000000000000 | 4194304     |\n");
+        printf("+------+----------------------+-------------+\n");
 }
