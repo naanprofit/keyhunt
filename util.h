@@ -1,6 +1,7 @@
 #ifndef CUSTOMUTILH
 #define CUSTOMUTILH
 
+#include <stdint.h>
 typedef struct str_list	{
 	int n;
 	char **data;
@@ -29,5 +30,8 @@ char *nextToken(Tokenizer *t);
 int isValidHex(char *data);
 void freetokenizer(Tokenizer *t);
 void stringtokenizer(char *data,Tokenizer *t);
+
+int validate_nk(uint64_t n, uint64_t k);
+void print_nk_table(void);
 
 #endif // CUSTOMUTILH

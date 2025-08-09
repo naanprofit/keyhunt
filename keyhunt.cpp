@@ -11,6 +11,7 @@ email: albertobsd@gmail.com
 #include <time.h>
 #include <vector>
 #include <inttypes.h>
+#include <errno.h>
 #include "base58/libbase58.h"
 #include "rmd160/rmd160.h"
 #include "oldbloom/oldbloom.h"
@@ -823,6 +824,18 @@ int main(int argc, char **argv)	{
 		}
 	}
 	
+        uint64_t nk_n = 0x100000000000ULL;
+        if(FLAG_N) {
+                if(str_N[0] == '0' && (str_N[1] == 'x' || str_N[1] == 'X')) {
+                        nk_n = strtoull(str_N+2, NULL, 16);
+                } else {
+                        nk_n = strtoull(str_N, NULL, 10);
+                }
+        }
+        if(!validate_nk(nk_n, (uint64_t)KFACTOR)) {
+                exit(EXIT_FAILURE);
+        }
+
 	if(  FLAGBSGSMODE == MODE_BSGS && FLAGENDOMORPHISM)	{
 		fprintf(stderr,"[E] Endomorphism doesn't work with BSGS\n");
 		exit(EXIT_FAILURE);
@@ -5830,12 +5843,14 @@ void menu() {
 	printf("-e          Enable endomorphism search (Only for address, rmd160 and vanity)\n");
 	printf("-f file     Specify file name with addresses or xpoints or uncompressed public keys\n");
 	printf("-I stride   Stride for xpoint, rmd160 and address, this option don't work with bsgs\n");
-	printf("-k value    Use this only with bsgs mode, k value is factor for M, more speed but more RAM use wisely\n");
+        printf("-k value    Use this only with bsgs mode, k value is factor for M, more speed but more RAM use wisely\n");
+        printf("            K must not exceed the maximum allowed for N (see table below)\n");
 	printf("-l look     What type of address/hash160 are you looking for <compress, uncompress, both> Only for rmd160 and address\n");
 	printf("-m mode     mode of search for cryptos. (bsgs, xpoint, rmd160, address, vanity) default: address\n");
 	printf("-M          Matrix screen, feel like a h4x0r, but performance will dropped\n");
-	printf("-n number   Check for N sequential numbers before the random chosen, this only works with -R option\n");
-	printf("            Use -n to set the N for the BSGS process. Bigger N more RAM needed\n");
+        printf("-n number   Check for N sequential numbers before the random chosen, this only works with -R option\n");
+        printf("            Use -n to set the N for the BSGS process. Bigger N more RAM needed (N >= 2^20)\n");
+        printf("            Valid N and K pairs are listed below\n");
 	printf("-q          Quiet the thread output\n");
 	printf("-r SR:EN    StarRange:EndRange, the end range can be omitted for search from start range to N-1 ECC value\n");
 	printf("-R          Random, this is the default behavior\n");
@@ -5849,6 +5864,8 @@ void menu() {
         printf("--mapped-size n   Reserve space for n entries in the mapped bloom file\n");
         printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
+        printf("\nValid n and maximum k values:\n");
+        print_nk_table();
         printf("\nExample:\n\n");
 	printf("./keyhunt -m rmd160 -f tests/unsolvedpuzzles.rmd -b 66 -l compress -R -q -t 8\n\n");
 	printf("This line runs the program with 8 threads from the range 20000000000000000 to 40000000000000000 without stats output\n\n");

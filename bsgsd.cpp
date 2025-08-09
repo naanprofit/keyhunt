@@ -399,6 +399,18 @@ int main(int argc, char **argv)	{
 	
 
 
+        uint64_t nk_n = 0x100000000000ULL;
+        if(FLAG_N) {
+                if(str_N[0] == '0' && (str_N[1] == 'x' || str_N[1] == 'X')) {
+                        nk_n = strtoull(str_N+2, NULL, 16);
+                } else {
+                        nk_n = strtoull(str_N, NULL, 10);
+                }
+        }
+        if(!validate_nk(nk_n, (uint64_t)KFACTOR)) {
+                exit(0);
+        }
+
 	stride.Set(&ONE);
 	init_generator();
 	
@@ -2282,16 +2294,19 @@ void menu() {
 	printf("\nUsage:\n");
 	printf("-h          show this help\n");
 	printf("-k value    Use this only with bsgs mode, k value is factor for M, more speed but more RAM use wisely\n");
+        printf("            K must not exceed the maximum allowed for N (see table below)\n");
 	printf("-n number   Check for N sequential numbers before the random chosen, this only works with -R option\n");
+        printf("            Use -n to set the N for the BSGS process. Bigger N more RAM needed (N >= 2^20)\n");
+        printf("            Valid N and K pairs are listed below\n");
 	printf("-t tn       Threads number, must be a positive integer\n");
 	printf("-p port     TCP port Number for listening conections");
 	printf("-i ip		IP Address for listening conections");
-	printf("\nExample:\n\n");
-	printf("./bsgs -k 512 \n\n");
-	exit(EXIT_FAILURE);
+        printf("\nValid n and maximum k values:\n");
+        print_nk_table();
+        printf("\nExample:\n\n");
+        printf("./bsgs -k 512 \n\n");
+        exit(EXIT_FAILURE);
 }
-
-
 void checkpointer(void *ptr,const char *file,const char *function,const  char *name,int line)	{
 	if(ptr == NULL)	{
 		fprintf(stderr,"[E] error in file %s, %s pointer %s on line %i\n",file,function,name,line); 
