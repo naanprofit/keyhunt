@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <inttypes.h>
 #include <sys/types.h>
@@ -473,12 +474,17 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
     if (file_exists) {
       fd = open(fname, O_RDWR);
       if (fd < 0) {
+        int err = errno;
+        fprintf(stderr, "bloom_init_mmap: open('%s') failed: %s\n", fname, strerror(err));
         return 1;
       }
       if ((uint64_t)st.st_size != cbytes) {
         if (resize) {
           if (ftruncate(fd, cbytes) != 0) {
+            int err = errno;
             close(fd);
+            fprintf(stderr, "bloom_init_mmap: ftruncate('%s', %llu) failed: %s\n", fname,
+                    (unsigned long long)cbytes, strerror(err));
             return 1;
           }
         } else {
@@ -491,17 +497,25 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
     } else {
       fd = open(fname, O_RDWR | O_CREAT, 0644);
       if (fd < 0) {
+        int err = errno;
+        fprintf(stderr, "bloom_init_mmap: open('%s') failed: %s\n", fname, strerror(err));
         return 1;
       }
       if (ftruncate(fd, cbytes) != 0) {
+        int err = errno;
         close(fd);
+        fprintf(stderr, "bloom_init_mmap: ftruncate('%s', %llu) failed: %s\n", fname,
+                (unsigned long long)cbytes, strerror(err));
         return 1;
       }
     }
 
     uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) {
+      int err = errno;
       close(fd);
+      fprintf(stderr, "bloom_init_mmap: mmap('%s', %llu) failed: %s\n", fname,
+              (unsigned long long)cbytes, strerror(err));
       return 1;
     }
     close(fd);
