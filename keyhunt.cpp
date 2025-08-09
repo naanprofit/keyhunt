@@ -39,6 +39,7 @@ email: albertobsd@gmail.com
 #include <getopt.h>
 #include <sys/sysinfo.h>
 #include <sys/mman.h>
+#include <fcntl.h>
 #include <sys/statvfs.h>
 #include <sys/stat.h>
 #endif
@@ -195,6 +196,7 @@ uint64_t bloom_bytes_for_entries_error(uint64_t entries, long double error);
 void bloom_entries_for_bytes(uint64_t bytes, uint64_t *entries, uint32_t *hashes);
 bool warn_if_insufficient_ram(uint64_t need_bytes);
 bool warn_if_insufficient_disk_space(const char *path, uint64_t need_bytes);
+uint64_t get_available_ram();
 
 void writeFileIfNeeded(const char *fileName);
 
@@ -303,6 +305,13 @@ const char *mapped_filename = NULL;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
 uint32_t mapped_chunks = 1;
+
+const char *bptable_filename = NULL;
+uint64_t bptable_size_override = 0;
+int bptable_fd = -1;
+uint64_t bptable_bytes = 0;
+int FLAGBPTABLEMAPPED = 0;
+char bptable_tmpfile[4096];
 int KFACTOR = 1;
 int MAXLENGTHADDRESS = -1;
 int NTHREADS = 1;
@@ -506,14 +515,16 @@ int main(int argc, char **argv)	{
        printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
        int option_index = 0;
-      static struct option long_options[] = {
-              {"mapped", optional_argument, 0, 0},
-              {"mapped-size", required_argument, 0, 0},
-              {"mapped-chunks", required_argument, 0, 0},
-              {"bloom-bytes", required_argument, 0, 0},
-              {"create-mapped", optional_argument, 0, 0},
-              {0, 0, 0, 0}
-      };
+       static struct option long_options[] = {
+               {"mapped", optional_argument, 0, 0},
+               {"mapped-size", required_argument, 0, 0},
+               {"mapped-chunks", required_argument, 0, 0},
+               {"ptable", optional_argument, 0, 0},
+               {"ptable-size", required_argument, 0, 0},
+               {"bloom-bytes", required_argument, 0, 0},
+               {"create-mapped", optional_argument, 0, 0},
+               {0, 0, 0, 0}
+       };
 
        while ((c = getopt_long(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, &option_index)) != -1) {
               if (c == 0) {
@@ -541,6 +552,22 @@ int main(int argc, char **argv)	{
                       } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
                               FLAGMAPPED = 1;
                               mapped_chunks = strtoul(optarg, NULL, 10);
+                      } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
+                              if (optarg) {
+                                      bptable_filename = optarg;
+                              }
+                      } else if (strcmp(long_options[option_index].name, "ptable-size") == 0) {
+                              char *end;
+                              uint64_t desired = strtoull(optarg, &end, 10);
+                              if (*end) {
+                                      switch (tolower(*end)) {
+                                              case 'k': desired *= 1024ULL; break;
+                                              case 'm': desired *= 1024ULL * 1024ULL; break;
+                                              case 'g': desired *= 1024ULL * 1024ULL * 1024ULL; break;
+                                              case 't': desired *= 1024ULL * 1024ULL * 1024ULL * 1024ULL; break;
+                                      }
+                              }
+                              bptable_size_override = desired;
                       } else if (strcmp(long_options[option_index].name, "bloom-bytes") == 0) {
                               FLAGMAPPED = 1;
                               uint64_t desired = strtoull(optarg, NULL, 10);
@@ -1497,12 +1524,57 @@ int main(int argc, char **argv)	{
 			BSGS_AMP3[i].Reduce();
 		}
 
-		bytes = (uint64_t)bsgs_m3 * (uint64_t) sizeof(struct bsgs_xvalue);
-		printf("[+] Allocating %.2f MB for %" PRIu64  " bP Points\n",(double)(bytes/1048576),bsgs_m3);
-		
-		bPtable = (struct bsgs_xvalue*) malloc(bytes);
-		checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
-		memset(bPtable,0,bytes);
+               bytes = (uint64_t)bsgs_m3 * (uint64_t) sizeof(struct bsgs_xvalue);
+               printf("[+] Allocating %.2f MB for %" PRIu64  " bP Points\n",(double)(bytes/1048576),bsgs_m3);
+
+               int use_mmap = FLAGMAPPED || bptable_filename != NULL || bptable_size_override != 0;
+               uint64_t avail = get_available_ram();
+               if(!use_mmap && avail && bytes > avail){
+                       fprintf(stderr,"[W] bP table of %.2f MB exceeds available RAM %.2f MB, using memory-mapped file.\n",(double)bytes/1048576.0,(double)avail/1048576.0);
+                       use_mmap = 1;
+               }
+               if(use_mmap){
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                       bPtable = (struct bsgs_xvalue*) malloc(bytes);
+                       checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
+                       memset(bPtable,0,bytes);
+#else
+                       uint64_t map_bytes = bytes;
+                       if(bptable_size_override && bptable_size_override > map_bytes){
+                               map_bytes = bptable_size_override;
+                       }
+                       const char *fname = bptable_filename;
+                       if(fname){
+                               bptable_fd = open(fname,O_RDWR | O_CREAT,0600);
+                       }else{
+                               strcpy(bptable_tmpfile,"/tmp/bptableXXXXXX");
+                               bptable_fd = mkstemp(bptable_tmpfile);
+                       }
+                       if(bptable_fd < 0){
+                               fprintf(stderr,"[E] Cannot create bP table file\n");
+                               exit(EXIT_FAILURE);
+                       }
+                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                               if(ftruncate(bptable_fd,map_bytes) != 0){
+                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                       exit(EXIT_FAILURE);
+                               }
+                       }
+                       void *map = mmap(NULL,map_bytes,PROT_READ|PROT_WRITE,MAP_SHARED,bptable_fd,0);
+                       if(map == MAP_FAILED){
+                               fprintf(stderr,"[E] mmap failed for bP table\n");
+                               exit(EXIT_FAILURE);
+                       }
+                       bPtable = (struct bsgs_xvalue*)map;
+                       bptable_bytes = map_bytes;
+                       FLAGBPTABLEMAPPED = 1;
+                       memset(bPtable,0,bptable_bytes);
+#endif
+               }else{
+                       bPtable = (struct bsgs_xvalue*) malloc(bytes);
+                       checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
+                       memset(bPtable,0,bytes);
+               }
 		
 		if(FLAGSAVEREADFILE && !FLAGMAPPED)	{
 			/*Reading file for 1st bloom filter */
@@ -2383,12 +2455,22 @@ int main(int argc, char **argv)	{
 				free(str_total);
 			}
 		}
-	}while(continue_flag);
-        printf("\nEnd\n");
-        if (FLAGMAPPED) {
+       }while(continue_flag);
+       printf("\nEnd\n");
+       if (FLAGBPTABLEMAPPED) {
+#if !defined(_WIN64) || defined(__CYGWIN__)
+               msync(bPtable, bptable_bytes, MS_SYNC);
+               munmap(bPtable, bptable_bytes);
+               close(bptable_fd);
+               if(!bptable_filename){
+                       unlink(bptable_tmpfile);
+               }
+#endif
+       }
+       if (FLAGMAPPED) {
 #if defined(_WIN64) && !defined(__CYGWIN__)
-                bloom_free(&bloom);
-                if (vanity_bloom)
+               bloom_free(&bloom);
+               if (vanity_bloom)
                         bloom_free(vanity_bloom);
                 if (bloom_bP)
                         for(i = 0; i < 256; i++)
@@ -5931,9 +6013,11 @@ void menu() {
         printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
        printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
        printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
-        printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
+       printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
        printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
+       printf("--ptable[=file]   Use a memory-mapped file for the bP table\n");
+       printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
         printf("\nExample:\n\n");
@@ -6800,6 +6884,23 @@ void bloom_entries_for_bytes(uint64_t bytes, uint64_t *entries, uint32_t *hashes
        if (hashes) {
                *hashes = best_k;
        }
+}
+
+uint64_t get_available_ram(){
+#if defined(_WIN64) && !defined(__CYGWIN__)
+       MEMORYSTATUSEX statex;
+       statex.dwLength = sizeof(statex);
+       if (GlobalMemoryStatusEx(&statex)) {
+               return statex.ullAvailPhys;
+       }
+       return 0;
+#else
+       struct sysinfo info;
+       if (sysinfo(&info) == 0) {
+               return (uint64_t)info.freeram * info.mem_unit;
+       }
+       return 0;
+#endif
 }
 
 bool warn_if_insufficient_ram(uint64_t need_bytes) {
