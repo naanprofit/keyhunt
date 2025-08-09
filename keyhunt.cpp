@@ -186,7 +186,7 @@ bool forceReadFileXPoint(char *fileName);
 bool processOneVanity();
 
 bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom);
-bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom);
+bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname = NULL);
 uint64_t bloom_bytes_for_entries(uint64_t entries);
 uint64_t bloom_bytes_for_entries_error(uint64_t entries, long double error);
 void bloom_entries_for_bytes(uint64_t bytes, uint64_t *entries, uint32_t *hashes);
@@ -1281,10 +1281,12 @@ int main(int argc, char **argv)	{
 #else
 			pthread_mutex_init(&bloom_bP_mutex[i],NULL);
 #endif
-			if(!initBloomFilterMapped(&bloom_bP[i],itemsbloom)){
-				fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
-				exit(EXIT_FAILURE);
-			}
+                        char fname[32];
+                        snprintf(fname, sizeof(fname), "bloom-%u.dat", (unsigned)i);
+                        if(!initBloomFilterMapped(&bloom_bP[i],itemsbloom,fname)){
+                                fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
+                                exit(EXIT_FAILURE);
+                        }
 			bloom_bP_totalbytes += bloom_bP[i].bytes;
 			//if(FLAGDEBUG) bloom_print(&bloom_bP[i]);
 		}
@@ -1310,10 +1312,12 @@ int main(int argc, char **argv)	{
 #else
 			pthread_mutex_init(&bloom_bPx2nd_mutex[i],NULL);
 #endif
-			if(!initBloomFilterMapped(&bloom_bPx2nd[i],itemsbloom2)){
-				fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
-				exit(EXIT_FAILURE);
-			}
+                        char fname2[32];
+                        snprintf(fname2, sizeof(fname2), "bloom2-%u.dat", (unsigned)i);
+                        if(!initBloomFilterMapped(&bloom_bPx2nd[i],itemsbloom2,fname2)){
+                                fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
+                                exit(EXIT_FAILURE);
+                        }
 			bloom_bP2_totalbytes += bloom_bPx2nd[i].bytes;
 			//if(FLAGDEBUG) bloom_print(&bloom_bPx2nd[i]);
 		}
@@ -1339,10 +1343,12 @@ int main(int argc, char **argv)	{
 #else
 			pthread_mutex_init(&bloom_bPx3rd_mutex[i],NULL);
 #endif
-			if(!initBloomFilterMapped(&bloom_bPx3rd[i],itemsbloom3)){
-				fprintf(stderr,"[E] error bloom_init [%" PRIu64 "]\n",i);
-				exit(EXIT_FAILURE);
-			}
+                        char fname3[32];
+                        snprintf(fname3, sizeof(fname3), "bloom3-%u.dat", (unsigned)i);
+                        if(!initBloomFilterMapped(&bloom_bPx3rd[i],itemsbloom3,fname3)){
+                                fprintf(stderr,"[E] error bloom_init [%" PRIu64 "]\n",i);
+                                exit(EXIT_FAILURE);
+                        }
 			bloom_bP3_totalbytes += bloom_bPx3rd[i].bytes;
 			//if(FLAGDEBUG) bloom_print(&bloom_bPx3rd[i]);
 		}
@@ -6731,17 +6737,17 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
 
 
 
-bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom) {
+bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname) {
         if(FLAGMAPPED) {
                 bool r = true;
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
-                const char *fname = mapped_filename ? mapped_filename : "bloom.dat";
+                const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
                uint64_t total = mapped_entries_override ? mapped_entries_override : ((items_bloom <= 10000)?10000:FLAGBLOOMMULTIPLIER*items_bloom);
                uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
                uint64_t need_bytes = bloom_bytes_for_entries_error(total, error);
-               warn_if_insufficient_disk_space(fname, need_bytes);
-               if(bloom_init_mmap(bloom_arg,total,error,fname, mapped_entries_override != 0, chunks) == 1){
+               warn_if_insufficient_disk_space(mapname, need_bytes);
+               if(bloom_init_mmap(bloom_arg,total,error,mapname, mapped_entries_override != 0, chunks) == 1){
                         fprintf(stderr,"[E] error bloom_init_mmap for %" PRIu64 " elements.\n",items_bloom);
                         r = false;
                 }
