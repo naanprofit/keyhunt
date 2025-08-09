@@ -12,6 +12,7 @@ email: albertobsd@gmail.com
 #include <vector>
 #include <inttypes.h>
 #include <errno.h>
+#include <ctype.h>
 #include "base58/libbase58.h"
 #include "rmd160/rmd160.h"
 #include "oldbloom/oldbloom.h"
@@ -522,7 +523,20 @@ int main(int argc, char **argv)	{
                               }
                       } else if (strcmp(long_options[option_index].name, "mapped-size") == 0) {
                               FLAGMAPPED = 1;
-                              mapped_entries_override = strtoull(optarg, NULL, 10);
+                              char *end;
+                              uint64_t desired = strtoull(optarg, &end, 10);
+                              if (*end) {
+                                      switch (tolower(*end)) {
+                                              case 'k': desired *= 1024ULL; break;
+                                              case 'm': desired *= 1024ULL * 1024ULL; break;
+                                              case 'g': desired *= 1024ULL * 1024ULL * 1024ULL; break;
+                                              case 't': desired *= 1024ULL * 1024ULL * 1024ULL * 1024ULL; break;
+                                      }
+                              }
+                              uint64_t n; uint32_t k;
+                              bloom_entries_for_bytes(desired, &n, &k);
+                              mapped_entries_override = n;
+                              mapped_error_override = powl(0.5L, (long double)k);
                       } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
                               FLAGMAPPED = 1;
                               mapped_chunks = strtoul(optarg, NULL, 10);
@@ -5915,7 +5929,7 @@ void menu() {
 	printf("-v value    Search for vanity Address, only with -m vanity\n");
         printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
         printf("--mapped[=file]   Use a memory mapped bloom filter file instead of RAM\n");
-        printf("--mapped-size n   Reserve space for n entries in the mapped bloom file\n");
+       printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
         printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
        printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
