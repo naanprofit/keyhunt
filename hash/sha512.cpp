@@ -60,11 +60,11 @@ namespace _sha512 {
 #ifndef WIN64
 #define _byteswap_ulong __builtin_bswap32
 #define _byteswap_uint64 __builtin_bswap64
-inline uint64_t _rotr64(uint64_t x, uint8_t r) {
-  asm("rorq %1,%0" : "+r" (x) : "c" (r));
-  return x;
-}
 #endif
+
+inline uint64_t _rotr64(uint64_t x, uint8_t r) {
+  return (x >> r) | (x << (64 - r));
+}
 
 #define ROR(x,n) _rotr64(x, n)
 #define S0(x)		(ROR(x, 28) ^ ROR(x, 34) ^ ROR(x, 39))
