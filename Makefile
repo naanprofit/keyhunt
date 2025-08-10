@@ -3,9 +3,11 @@ ARCH := $(shell uname -m)
 ifeq ($(ARCH),aarch64)
 ARCH_FLAGS := -march=armv8-a -mtune=generic -U__SSE2__
 HASH_OBJS := hash/ripemd160.o hash/sha256.o hash/ripemd160_neon.o hash/sha256_neon.o
+ECC_OBJS :=
 else
 ARCH_FLAGS := -m64 -march=native -mtune=native -mssse3
 HASH_OBJS := hash/ripemd160.o hash/sha256.o hash/ripemd160_sse.o hash/sha256_sse.o
+ECC_OBJS := Int.o IntMod.o
 endif
 
 CXXFLAGS := $(ARCH_FLAGS) -Wall -Wextra -Wno-deprecated-copy -Ofast -ftree-vectorize
@@ -22,10 +24,12 @@ default:
 >g++ $(CXXFLAGS) -c sha3/keccak.c -o keccak.o
 >gcc $(CFLAGS) -c xxhash/xxhash.c -o xxhash.o
 >g++ $(CXXFLAGS) -c util.c -o util.o
+ifneq ($(ECC_OBJS),)
 >g++ $(CXXFLAGS) -c secp256k1/Int.cpp -o Int.o
+>g++ $(CXXFLAGS) -c secp256k1/IntMod.cpp -o IntMod.o
+endif
 >g++ $(CXXFLAGS) -c secp256k1/Point.cpp -o Point.o
 >g++ $(CXXFLAGS) -c secp256k1/SECP256K1.cpp -o SECP256K1.o
->g++ $(CXXFLAGS) -c secp256k1/IntMod.cpp -o IntMod.o
 >g++ $(CXXFLAGS) -flto -c secp256k1/Random.cpp -o Random.o
 >g++ $(CXXFLAGS) -flto -c secp256k1/IntGroup.cpp -o IntGroup.o
 >g++ $(CXXFLAGS) -flto -c hash/ripemd160.cpp -o hash/ripemd160.o
@@ -37,7 +41,7 @@ else
 >g++ $(CXXFLAGS) -flto -c hash/ripemd160_sse.cpp -o hash/ripemd160_sse.o
 >g++ $(CXXFLAGS) -flto -c hash/sha256_sse.cpp -o hash/sha256_sse.o
 endif
->g++ $(CXXFLAGS) -o keyhunt keyhunt.cpp base58.o rmd160.o $(HASH_OBJS) bloom.o oldbloom.o xxhash.o util.o Int.o Point.o SECP256K1.o IntMod.o Random.o IntGroup.o sha3.o keccak.o -lm -lpthread
+>g++ $(CXXFLAGS) -o keyhunt keyhunt.cpp base58.o rmd160.o $(HASH_OBJS) bloom.o oldbloom.o xxhash.o util.o $(ECC_OBJS) Point.o SECP256K1.o Random.o IntGroup.o sha3.o keccak.o -lm -lpthread
 >rm -r *.o
 
 clean:
@@ -70,10 +74,12 @@ bsgsd:
 >g++ $(CXXFLAGS) -c sha3/keccak.c -o keccak.o
 >gcc $(CFLAGS) -c xxhash/xxhash.c -o xxhash.o
 >g++ $(CXXFLAGS) -c util.c -o util.o
+ifneq ($(ECC_OBJS),)
 >g++ $(CXXFLAGS) -c secp256k1/Int.cpp -o Int.o
+>g++ $(CXXFLAGS) -c secp256k1/IntMod.cpp -o IntMod.o
+endif
 >g++ $(CXXFLAGS) -c secp256k1/Point.cpp -o Point.o
 >g++ $(CXXFLAGS) -c secp256k1/SECP256K1.cpp -o SECP256K1.o
->g++ $(CXXFLAGS) -c secp256k1/IntMod.cpp -o IntMod.o
 >g++ $(CXXFLAGS) -flto -c secp256k1/Random.cpp -o Random.o
 >g++ $(CXXFLAGS) -flto -c secp256k1/IntGroup.cpp -o IntGroup.o
 >g++ $(CXXFLAGS) -flto -c hash/ripemd160.cpp -o hash/ripemd160.o
@@ -85,6 +91,6 @@ else
 >g++ $(CXXFLAGS) -flto -c hash/ripemd160_sse.cpp -o hash/ripemd160_sse.o
 >g++ $(CXXFLAGS) -flto -c hash/sha256_sse.cpp -o hash/sha256_sse.o
 endif
->g++ $(CXXFLAGS) -o bsgsd bsgsd.cpp base58.o rmd160.o $(HASH_OBJS) bloom.o oldbloom.o xxhash.o util.o Int.o Point.o SECP256K1.o IntMod.o Random.o IntGroup.o sha3.o keccak.o -lm -lpthread
+>g++ $(CXXFLAGS) -o bsgsd bsgsd.cpp base58.o rmd160.o $(HASH_OBJS) bloom.o oldbloom.o xxhash.o util.o $(ECC_OBJS) Point.o SECP256K1.o Random.o IntGroup.o sha3.o keccak.o -lm -lpthread
 >rm -r *.o
 

@@ -21,8 +21,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
-#if defined(__x86_64__) || defined(_M_X64) || defined(__SSE2__)
+
+#ifdef __SSE2__
 #include <emmintrin.h>
+#elif defined(__ARM_NEON)
+#include <arm_neon.h>
 #endif
 
 #define MAX(x,y) (((x)>(y))?(x):(y))
