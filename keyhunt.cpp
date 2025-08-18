@@ -17,6 +17,7 @@ email: albertobsd@gmail.com
 #include "rmd160/rmd160.h"
 #include "oldbloom/oldbloom.h"
 #include "bloom/bloom.h"
+#include "bloom/bloomfile.h"
 #include "sha3/sha3.h"
 #include "util.h"
 
@@ -305,6 +306,7 @@ const char *mapped_filename = NULL;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
 uint32_t mapped_chunks = 1;
+bool rebuild_blooms_flag = false;
 
 const char *bptable_filename = NULL;
 uint64_t bptable_size_override = 0;
@@ -524,6 +526,7 @@ int main(int argc, char **argv)	{
                {"ptable-size", required_argument, 0, 0},
                {"bloom-bytes", required_argument, 0, 0},
                {"create-mapped", optional_argument, 0, 0},
+               {"rebuild-blooms", no_argument, 0, 0},
                {"tmpdir", required_argument, 0, 0},
                {0, 0, 0, 0}
        };
@@ -587,6 +590,8 @@ int main(int argc, char **argv)	{
                                       mapped_entries_override = n;
                                       mapped_error_override = powl(0.5L, (long double)k);
                               }
+                      } else if (strcmp(long_options[option_index].name, "rebuild-blooms") == 0) {
+                              rebuild_blooms_flag = true;
                       } else if (strcmp(long_options[option_index].name, "tmpdir") == 0) {
                               tmpdir_path = optarg;
                       }
@@ -6033,6 +6038,7 @@ void menu() {
        printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
        printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
+       printf("--rebuild-blooms  Force rebuild of all bloom shard files\n");
        printf("--ptable[=file]   Use a memory-mapped file for the bP table\n");
        printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
        printf("--tmpdir dir     Directory for temporary files\n");
@@ -6978,49 +6984,118 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
 
 
 
+// New mapped bloom initialization with shard header handling
+static bool init_bloom_shard(struct bloom *bloom_arg, uint64_t items_bloom,
+                             const char *path, uint16_t tier_id, uint16_t shard_id) {
+        uint64_t n = mapped_entries_override ? mapped_entries_override : items_bloom;
+        long double error = mapped_error_override ? mapped_error_override : 0.001L;
+        uint64_t m_bits; uint32_t k_hashes;
+        bloom_size_params(n, (double)error, m_bits, k_hashes);
+        size_t payload_bytes = (m_bits + 7) / 8;
+        size_t header_sz = sizeof(BloomHeader);
+        size_t file_bytes = header_sz + payload_bytes;
+
+        bool existed = file_exists(path);
+        int fd = ::open(path, O_RDWR | O_CREAT, 0644);
+        if (fd < 0) {
+                perror("open bloom shard");
+                return false;
+        }
+
+        uint8_t *base = NULL;
+        if (!existed || rebuild_blooms_flag) {
+                if (::ftruncate(fd, file_bytes) != 0) {
+                        perror("ftruncate bloom shard");
+                        ::close(fd);
+                        return false;
+                }
+                base = (uint8_t*)::mmap(NULL, file_bytes, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+                if (base == MAP_FAILED) {
+                        perror("mmap bloom shard");
+                        ::close(fd);
+                        return false;
+                }
+                ::memset(base, 0, file_bytes);
+                BloomHeader hdr{0x4B48424C,1,tier_id,shard_id,(uint16_t)k_hashes,n,payload_bytes};
+                write_header(base, hdr);
+                ::msync(base, file_bytes, MS_SYNC);
+        } else {
+                struct stat st{};
+                if (::fstat(fd, &st) != 0 || (size_t)st.st_size != file_bytes) {
+                        if (::ftruncate(fd, file_bytes) != 0) {
+                                perror("ftruncate bloom shard");
+                                ::close(fd);
+                                return false;
+                        }
+                }
+                base = (uint8_t*)::mmap(NULL, file_bytes, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+                if (base == MAP_FAILED) {
+                        perror("mmap bloom shard");
+                        ::close(fd);
+                        return false;
+                }
+                BloomHeader hdr{};
+                bool ok = read_header(base, hdr) && hdr.bytes == payload_bytes && hdr.k == k_hashes &&
+                          hdr.tier == tier_id && hdr.shard == shard_id;
+                if (!ok) {
+                        ::memset(base, 0, file_bytes);
+                        hdr = BloomHeader{0x4B48424C,1,tier_id,shard_id,(uint16_t)k_hashes,n,payload_bytes};
+                        write_header(base, hdr);
+                        ::msync(base, file_bytes, MS_SYNC);
+                }
+        }
+        ::close(fd);
+
+        uint8_t *payload = base + header_sz;
+        bloom_arg->bf = payload;
+        bloom_arg->bf_chunks = (uint8_t**)malloc(sizeof(uint8_t*));
+        if (!bloom_arg->bf_chunks) {
+                munmap(base, file_bytes);
+                return false;
+        }
+        bloom_arg->bf_chunks[0] = base;
+        bloom_arg->mapped_chunks = 1;
+        bloom_arg->chunk_bytes = file_bytes;
+        bloom_arg->last_chunk_bytes = file_bytes;
+        bloom_arg->bytes = payload_bytes;
+        bloom_arg->bits = payload_bytes * 8;
+        bloom_arg->entries = n;
+        bloom_arg->hashes = (uint8_t)k_hashes;
+        bloom_arg->bpe = (double)bloom_arg->bits / (double)n;
+        bloom_arg->error = powl(0.5L, (long double)k_hashes);
+        bloom_arg->ready = 1;
+        bloom_arg->major = BLOOM_VERSION_MAJOR;
+        bloom_arg->minor = BLOOM_VERSION_MINOR;
+        return true;
+}
+
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname) {
         if(FLAGMAPPED) {
-                static bool mapped_override_applied = false;
                 bool r = true;
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
                 const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
 
+                uint16_t tier_id = 0, shard_id = 0;
+                if (fname) {
+                        const char *base = strrchr(fname, '/');
+                        base = base ? base + 1 : fname;
+                        if (strncmp(base, "bloom3-", 7) == 0) { tier_id = 3; shard_id = (uint16_t)strtoul(base+7, NULL, 10); }
+                        else if (strncmp(base, "bloom2-", 7) == 0) { tier_id = 2; shard_id = (uint16_t)strtoul(base+7, NULL, 10); }
+                        else if (strncmp(base, "bloom-", 6) == 0) { tier_id = 1; shard_id = (uint16_t)strtoul(base+6, NULL, 10); }
+                }
+                if (tier_id >= 1 && tier_id <=3) {
+                        return init_bloom_shard(bloom_arg, items_bloom, mapname, tier_id, shard_id);
+                }
+
                 uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
-                if (!mapped_entries_override) {
-                        char fname_chk[1024];
-                        if (chunks > 1) {
-                                snprintf(fname_chk, sizeof(fname_chk), "%s.%u", mapname, 0);
-                        } else {
-                                snprintf(fname_chk, sizeof(fname_chk), "%s", mapname);
-                        }
-                        struct stat st;
-                        if (stat(fname_chk, &st) == 0) {
-                                if (bloom_load_mmap(bloom_arg, mapname, chunks) == 1) {
-                                        fprintf(stderr, "[E] bloom_load_mmap failed for '%s'\n", mapname);
-                                        r = false;
-                                } else {
-                                        printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
-                                }
-                                return r;
-                        }
-                }
+                uint64_t total = mapped_entries_override ? mapped_entries_override
+                        : (items_bloom <= 10000 ? 10000 : FLAGBLOOMMULTIPLIER * items_bloom);
 
-                uint64_t total;
-                if (mapped_entries_override && (!mapped_override_applied || items_bloom >= mapped_entries_override)) {
-                        total = mapped_entries_override;
-                        if (!mapped_override_applied) {
-                                mapped_override_applied = true; // apply override only once by default
-                        }
-                } else {
-                        total = (items_bloom <= 10000) ? 10000 : FLAGBLOOMMULTIPLIER * items_bloom;
-                }
-
-               long double error = mapped_error_override ? mapped_error_override : 0.000001L;
-               uint64_t need_bytes = bloom_bytes_for_entries_error(total, error);
-               warn_if_insufficient_disk_space(mapname, need_bytes);
-               if(bloom_init_mmap(bloom_arg,total,error,mapname, mapped_entries_override != 0, chunks) == 1){
-                        fprintf(stderr,"[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",
-                                mapname, need_bytes, total);
+                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
+                uint64_t need_bytes = bloom_bytes_for_entries_error(total, error);
+                warn_if_insufficient_disk_space(mapname, need_bytes);
+                if(bloom_init_mmap(bloom_arg,total,error,mapname, mapped_entries_override != 0, chunks) == 1){
+                        fprintf(stderr,"[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n", mapname, need_bytes, total);
                         r = false;
                 }
                 printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
