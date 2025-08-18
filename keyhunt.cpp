@@ -7009,13 +7009,14 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
         (void)bloom_arg; (void)items_bloom; (void)fname;
         return false;
 #else
-        if (!FLAGMAPPED) {
-                return initBloomFilter(bloom_arg,items_bloom);
-        }
+       if (!FLAGMAPPED) {
+               return initBloomFilter(bloom_arg,items_bloom);
+       }
 
-        printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
-        const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
-        uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
+       memset(bloom_arg, 0, sizeof(struct bloom));
+       printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
+       const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+       uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
 
         uint64_t total = mapped_entries_override ? mapped_entries_override : ((items_bloom <= 1000) ? 1000 : (uint64_t)FLAGBLOOMMULTIPLIER * items_bloom);
         double target_p = mapped_error_override ? (double)mapped_error_override : 0.0001;
@@ -7043,8 +7044,13 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
         uint16_t tier_id = 0, shard_id = 0;
         parse_tier_shard(mapname, tier_id, shard_id);
 
-        const size_t header_sz = sizeof(BloomHeader);
-        for (uint32_t i = 0; i < chunks; i++) {
+	const size_t hdr_size = sizeof(BloomHeader);
+	long page_sz = sysconf(_SC_PAGE_SIZE);
+	if (page_sz <= 0) {
+		page_sz = 4096;
+	}
+		const size_t header_sz = ((hdr_size + (size_t)page_sz - 1) / (size_t)page_sz) * (size_t)page_sz;
+       for (uint32_t i = 0; i < chunks; i++) {
                 uint64_t cbytes = (i == chunks - 1) ? bloom_arg->last_chunk_bytes : bloom_arg->chunk_bytes;
                 char path[1024];
                 if (chunks > 1) {
@@ -7058,20 +7064,20 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                         perror("open");
                         return false;
                 }
-                size_t file_bytes = header_sz + cbytes;
-                bool rebuild = rebuild_blooms || !existed;
-                if (!rebuild) {
-                        struct stat st{};
-                        if (::fstat(fd, &st) != 0 || (size_t)st.st_size != file_bytes) {
-                                rebuild = true;
-                        } else {
-                                BloomHeader hdr{};
-                                if (::pread(fd, &hdr, header_sz, 0) != (ssize_t)header_sz || !read_header((uint8_t*)&hdr, hdr) ||
+               size_t file_bytes = header_sz + cbytes;
+               bool rebuild = rebuild_blooms || !existed;
+               if (!rebuild) {
+                       struct stat st{};
+                       if (::fstat(fd, &st) != 0 || (size_t)st.st_size != file_bytes) {
+                               rebuild = true;
+                       } else {
+                               BloomHeader hdr{};
+                               if (::pread(fd, &hdr, hdr_size, 0) != (ssize_t)hdr_size || !read_header((uint8_t*)&hdr, hdr) ||
                                     hdr.bytes != cbytes || hdr.k != k_hashes || hdr.items != total || hdr.tier != tier_id || hdr.shard != shard_id) {
-                                        rebuild = true;
-                                }
-                        }
-                }
+                                       rebuild = true;
+                               }
+                       }
+               }
 
                 if (rebuild) {
                         if (::ftruncate(fd, file_bytes) != 0) {
@@ -7092,12 +7098,12 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                         ::munmap(p, file_bytes);
                 }
 
-                uint8_t *map = (uint8_t*)::mmap(nullptr, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, header_sz);
-                if (map == MAP_FAILED) {
-                        perror("mmap");
-                        ::close(fd);
-                        return false;
-                }
+               uint8_t *map = (uint8_t*)::mmap(nullptr, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, header_sz);
+               if (map == MAP_FAILED) {
+                       perror("mmap");
+                       ::close(fd);
+                       return false;
+               }
                 ::close(fd);
                 if (chunks > 1) {
                         bloom_arg->bf_chunks[i] = map;
