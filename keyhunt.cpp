@@ -305,6 +305,7 @@ const char *mapped_filename = NULL;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
 uint32_t mapped_chunks = 1;
+bool rebuild_blooms = false;
 
 const char *bptable_filename = NULL;
 uint64_t bptable_size_override = 0;
@@ -525,6 +526,7 @@ int main(int argc, char **argv)	{
                {"bloom-bytes", required_argument, 0, 0},
                {"create-mapped", optional_argument, 0, 0},
                {"tmpdir", required_argument, 0, 0},
+               {"rebuild-blooms", no_argument, 0, 0},
                {0, 0, 0, 0}
        };
 
@@ -589,6 +591,8 @@ int main(int argc, char **argv)	{
                               }
                       } else if (strcmp(long_options[option_index].name, "tmpdir") == 0) {
                               tmpdir_path = optarg;
+                      } else if (strcmp(long_options[option_index].name, "rebuild-blooms") == 0) {
+                              rebuild_blooms = true;
                       }
                       continue;
               }
@@ -887,41 +891,14 @@ int main(int argc, char **argv)	{
                         fprintf(stderr, "[E] --create-mapped requires size via argument or --bloom-bytes\n");
                         exit(EXIT_FAILURE);
                 }
-                const char *mapname = mapped_filename ? mapped_filename : "bloom.dat";
-                uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
-                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
-                uint64_t need_bytes = bloom_bytes_for_entries_error(mapped_entries_override, error);
-                struct bloom tmp;
-                if (bloom_init_mmap(&tmp, mapped_entries_override, error, mapname, 1, chunks) == 1) {
-                        fprintf(stderr, "[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",
-                                mapname, need_bytes, mapped_entries_override);
+               const char *mapname = mapped_filename ? mapped_filename : "bloom.dat";
+               struct bloom tmp;
+               if (!initBloomFilterMapped(&tmp, mapped_entries_override, mapname)) {
+                        fprintf(stderr, "[E] initBloomFilterMapped failed for '%s'\n", mapname);
                         exit(EXIT_FAILURE);
                 }
-#if defined(_WIN64) && !defined(__CYGWIN__)
-                if (tmp.mapped_chunks > 1 && tmp.bf_chunks) {
-                        for (uint32_t i = 0; i < tmp.mapped_chunks; i++) {
-                                uint64_t cbytes = (i == tmp.mapped_chunks - 1) ? tmp.last_chunk_bytes : tmp.chunk_bytes;
-                                memset(tmp.bf_chunks[i], 0, cbytes);
-                                FlushViewOfFile(tmp.bf_chunks[i], cbytes);
-                        }
-                } else {
-                        memset(tmp.bf, 0, tmp.bytes);
-                        FlushViewOfFile(tmp.bf, tmp.bytes);
-                }
-#else
-                if (tmp.mapped_chunks > 1 && tmp.bf_chunks) {
-                        for (uint32_t i = 0; i < tmp.mapped_chunks; i++) {
-                                uint64_t cbytes = (i == tmp.mapped_chunks - 1) ? tmp.last_chunk_bytes : tmp.chunk_bytes;
-                                memset(tmp.bf_chunks[i], 0, cbytes);
-                                msync(tmp.bf_chunks[i], cbytes, MS_SYNC);
-                        }
-                } else {
-                        memset(tmp.bf, 0, tmp.bytes);
-                        msync(tmp.bf, tmp.bytes, MS_SYNC);
-                }
-#endif
-                bloom_unmap(&tmp);
-                return 0;
+               bloom_unmap(&tmp);
+               return 0;
         }
 
         uint64_t nk_n = 0x100000000000ULL;
@@ -6978,55 +6955,164 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
 
 
 
-bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname) {
-        if(FLAGMAPPED) {
-                static bool mapped_override_applied = false;
-                bool r = true;
-                printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
-                const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+static bool file_exists(const char *path) {
+        struct stat st{};
+        return ::stat(path, &st) == 0;
+}
 
-                uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
-                if (!mapped_entries_override) {
-                        char fname_chk[1024];
-                        if (chunks > 1) {
-                                snprintf(fname_chk, sizeof(fname_chk), "%s.%u", mapname, 0);
-                        } else {
-                                snprintf(fname_chk, sizeof(fname_chk), "%s", mapname);
-                        }
-                        struct stat st;
-                        if (stat(fname_chk, &st) == 0) {
-                                if (bloom_load_mmap(bloom_arg, mapname, chunks) == 1) {
-                                        fprintf(stderr, "[E] bloom_load_mmap failed for '%s'\n", mapname);
-                                        r = false;
-                                } else {
-                                        printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
-                                }
-                                return r;
-                        }
-                }
+struct BloomHeader {
+        uint32_t magic;
+        uint16_t version;
+        uint16_t tier;
+        uint16_t shard;
+        uint16_t k;
+        uint64_t items;
+        uint64_t bytes;
+};
 
-                uint64_t total;
-                if (mapped_entries_override && (!mapped_override_applied || items_bloom >= mapped_entries_override)) {
-                        total = mapped_entries_override;
-                        if (!mapped_override_applied) {
-                                mapped_override_applied = true; // apply override only once by default
-                        }
-                } else {
-                        total = (items_bloom <= 10000) ? 10000 : FLAGBLOOMMULTIPLIER * items_bloom;
-                }
+static void write_header(uint8_t *base, const BloomHeader &h) {
+        memcpy(base, &h, sizeof(BloomHeader));
+}
 
-               long double error = mapped_error_override ? mapped_error_override : 0.000001L;
-               uint64_t need_bytes = bloom_bytes_for_entries_error(total, error);
-               warn_if_insufficient_disk_space(mapname, need_bytes);
-               if(bloom_init_mmap(bloom_arg,total,error,mapname, mapped_entries_override != 0, chunks) == 1){
-                        fprintf(stderr,"[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",
-                                mapname, need_bytes, total);
-                        r = false;
-                }
-                printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
-                return r;
+static bool read_header(const uint8_t *base, BloomHeader &h) {
+        memcpy(&h, base, sizeof(BloomHeader));
+        if (h.magic != 0x4B48424C) return false;
+        if (h.version != 1) return false;
+        if (h.shard > 255 || h.tier > 3) return false;
+        return true;
+}
+
+static inline void bloom_size_params(uint64_t n, double p, uint64_t &m_bits, uint32_t &k) {
+        if (n == 0) { m_bits = 0; k = 1; return; }
+        const double ln2 = 0.6931471805599453;
+        double m = - (double)n * std::log(p) / (ln2*ln2);
+        m_bits = (uint64_t) std::max(64.0, std::ceil(m));
+        k = (uint32_t) std::max(1.0, std::round((m_bits / (double)n) * ln2));
+}
+
+static void parse_tier_shard(const char *name, uint16_t &tier, uint16_t &shard) {
+        tier = 0; shard = 0;
+        if (!name) return;
+        const char *base = strrchr(name, '/');
+        const char *n = base ? base + 1 : name;
+        if (strncmp(n, "bloom2-", 7) == 0) {
+                tier = 2; shard = (uint16_t)strtoul(n + 7, NULL, 10);
+        } else if (strncmp(n, "bloom3-", 7) == 0) {
+                tier = 3; shard = (uint16_t)strtoul(n + 7, NULL, 10);
+        } else if (strncmp(n, "bloom-", 6) == 0) {
+                tier = 1; shard = (uint16_t)strtoul(n + 6, NULL, 10);
         }
-        return initBloomFilter(bloom_arg,items_bloom);
+}
+
+bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname) {
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        (void)bloom_arg; (void)items_bloom; (void)fname;
+        return false;
+#else
+        if (!FLAGMAPPED) {
+                return initBloomFilter(bloom_arg,items_bloom);
+        }
+
+        printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
+        const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+        uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
+
+        uint64_t total = mapped_entries_override ? mapped_entries_override : ((items_bloom <= 1000) ? 1000 : (uint64_t)FLAGBLOOMMULTIPLIER * items_bloom);
+        double target_p = mapped_error_override ? (double)mapped_error_override : 0.0001;
+        uint64_t m_bits; uint32_t k_hashes;
+        bloom_size_params(total, target_p, m_bits, k_hashes);
+        uint64_t payload_bytes = (m_bits + 7) / 8;
+
+        bloom_arg->entries = total;
+        bloom_arg->bits = m_bits;
+        bloom_arg->bytes = payload_bytes;
+        bloom_arg->hashes = (uint8_t)k_hashes;
+        bloom_arg->error = powl(0.5L, (long double)k_hashes);
+        bloom_arg->bpe = (double)bloom_arg->bits / (double)bloom_arg->entries;
+        bloom_arg->mapped_chunks = chunks;
+        bloom_arg->chunk_bytes = (chunks > 1) ? payload_bytes / chunks : payload_bytes;
+        bloom_arg->last_chunk_bytes = payload_bytes - bloom_arg->chunk_bytes * (chunks - 1);
+
+        if (chunks > 1) {
+                bloom_arg->bf_chunks = (uint8_t**)calloc(chunks, sizeof(uint8_t*));
+                if (!bloom_arg->bf_chunks) {
+                        return false;
+                }
+        }
+
+        uint16_t tier_id = 0, shard_id = 0;
+        parse_tier_shard(mapname, tier_id, shard_id);
+
+        const size_t header_sz = sizeof(BloomHeader);
+        for (uint32_t i = 0; i < chunks; i++) {
+                uint64_t cbytes = (i == chunks - 1) ? bloom_arg->last_chunk_bytes : bloom_arg->chunk_bytes;
+                char path[1024];
+                if (chunks > 1) {
+                        snprintf(path, sizeof(path), "%s.%u", mapname, i);
+                } else {
+                        snprintf(path, sizeof(path), "%s", mapname);
+                }
+                bool existed = file_exists(path);
+                int fd = ::open(path, O_RDWR | O_CREAT, 0644);
+                if (fd < 0) {
+                        perror("open");
+                        return false;
+                }
+                size_t file_bytes = header_sz + cbytes;
+                bool rebuild = rebuild_blooms || !existed;
+                if (!rebuild) {
+                        struct stat st{};
+                        if (::fstat(fd, &st) != 0 || (size_t)st.st_size != file_bytes) {
+                                rebuild = true;
+                        } else {
+                                BloomHeader hdr{};
+                                if (::pread(fd, &hdr, header_sz, 0) != (ssize_t)header_sz || !read_header((uint8_t*)&hdr, hdr) ||
+                                    hdr.bytes != cbytes || hdr.k != k_hashes || hdr.items != total || hdr.tier != tier_id || hdr.shard != shard_id) {
+                                        rebuild = true;
+                                }
+                        }
+                }
+
+                if (rebuild) {
+                        if (::ftruncate(fd, file_bytes) != 0) {
+                                perror("ftruncate");
+                                ::close(fd);
+                                return false;
+                        }
+                        void *p = ::mmap(nullptr, file_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                        if (p == MAP_FAILED) {
+                                perror("mmap");
+                                ::close(fd);
+                                return false;
+                        }
+                        ::memset(p, 0, file_bytes);
+                        BloomHeader hdr{0x4B48424C, 1, tier_id, shard_id, (uint16_t)k_hashes, total, cbytes};
+                        write_header((uint8_t*)p, hdr);
+                        ::msync(p, file_bytes, MS_SYNC);
+                        ::munmap(p, file_bytes);
+                }
+
+                uint8_t *map = (uint8_t*)::mmap(nullptr, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, header_sz);
+                if (map == MAP_FAILED) {
+                        perror("mmap");
+                        ::close(fd);
+                        return false;
+                }
+                ::close(fd);
+                if (chunks > 1) {
+                        bloom_arg->bf_chunks[i] = map;
+                } else {
+                        bloom_arg->bf = map;
+                }
+        }
+
+        if (chunks > 1) {
+                bloom_arg->bf = bloom_arg->bf_chunks[0];
+        }
+
+        printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+        return true;
+#endif
 }
 
 bool warn_if_insufficient_disk_space(const char *path, uint64_t need_bytes) {
