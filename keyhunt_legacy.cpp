@@ -1723,9 +1723,14 @@ int main(int argc, char **argv)	{
 				fclose(fd_aux3);
 				FLAGREADEDFILE3 = 1;
 			}
-			else	{
-				FLAGREADEDFILE3 = 0;
-			}
+			else    {
+                                FLAGREADEDFILE3 = 0;
+                                if(FLAGLOADPTABLE){
+                                        fprintf(stderr,"[E] Missing bP table file %s\n",buffer_bloom_file);
+                                        fprintf(stderr,"    Remove --loadptable or generate the table first.\n");
+                                        exit(EXIT_FAILURE);
+                                }
+                        }
 			
 			/*Reading file for 3rd bloom filter */
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_7_%" PRIu64 ".blm",bsgs_m3);
