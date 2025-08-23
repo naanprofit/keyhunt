@@ -1874,7 +1874,7 @@ int main(int argc, char **argv)	{
 			
 		}
 		
-		if(!FLAGLOADPTABLE && (!FLAGREADEDFILE1 || !FLAGREADEDFILE2 || !FLAGREADEDFILE3 || !FLAGREADEDFILE4))	{
+		if((!FLAGREADEDFILE1 || !FLAGREADEDFILE2 || !FLAGREADEDFILE4) || (!FLAGLOADPTABLE && !FLAGREADEDFILE3))   {
 			if(FLAGREADEDFILE1 == 1)	{
 				/* 
 					We need just to make File 2 to File 4 this is
@@ -2131,7 +2131,7 @@ int main(int argc, char **argv)	{
 			printf(" done\n");
 			fflush(stdout);
 		}	
-		if(!FLAGREADEDFILE3)	{
+		if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)   {
 			printf("[+] Sorting %lu elements... ",bsgs_m3);
 			fflush(stdout);
 			bsgs_sort(bPtable,bsgs_m3);
@@ -2222,8 +2222,8 @@ int main(int argc, char **argv)	{
 				}
 			}
 			
-			if(!FLAGREADEDFILE3)	{
-				/* Writing file for bPtable */
+			if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)    {
+                                /* Writing file for bPtable */
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_2_%" PRIu64 ".tbl",bsgs_m3);
 				fd_aux3 = fopen(buffer_bloom_file,"wb");
 				if(fd_aux3 != NULL)	{
@@ -2287,6 +2287,9 @@ int main(int argc, char **argv)	{
 		}
 
 
+                if(!FLAGREADEDFILE1) FLAGREADEDFILE1 = 1;
+                if(!FLAGREADEDFILE2) FLAGREADEDFILE2 = 1;
+                if(!FLAGREADEDFILE4) FLAGREADEDFILE4 = 1;
 		i = 0;
 
 		steps = (uint64_t *) calloc(NTHREADS,sizeof(uint64_t));
@@ -4822,7 +4825,7 @@ void *thread_bPload(void *vargp)	{
 			}
 			*/
 			if(i_counter < bsgs_m3)	{
-				if(!FLAGREADEDFILE3)	{
+				if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)    {
 					memcpy(bPtable[i_counter].value,rawvalue+16,BSGS_XVALUE_RAM);
 					bPtable[i_counter].index = i_counter;
 				}
@@ -5005,7 +5008,7 @@ void *thread_bPload_2blooms(void *vargp)	{
 			pts[j].x.Get32Bytes((unsigned char*)rawvalue);
 			bloom_bP_index = (uint8_t)rawvalue[0];
 			if(i_counter < bsgs_m3)	{
-				if(!FLAGREADEDFILE3)	{
+				if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)    {
 					memcpy(bPtable[i_counter].value,rawvalue+16,BSGS_XVALUE_RAM);
 					bPtable[i_counter].index = i_counter;
 				}
