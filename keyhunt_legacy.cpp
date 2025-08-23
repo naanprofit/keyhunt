@@ -509,7 +509,7 @@ int main(int argc, char **argv)	{
        int option_index = 0;
        static struct option long_options[] = {
                {"mapped", optional_argument, 0, 0},
-               {"ptable", optional_argument, 0, 0},
+               {"ptable", required_argument, 0, 0},
                {"ptable-size", required_argument, 0, 0},
                {"tmpdir", required_argument, 0, 0},
                {0, 0, 0, 0}
@@ -523,9 +523,7 @@ int main(int argc, char **argv)	{
                                        bptable_filename = optarg;
                                }
                        } else if(strcmp(long_options[option_index].name,"ptable") == 0){
-                               if(optarg){
-                                       bptable_filename = optarg;
-                               }
+                               bptable_filename = optarg;
                        } else if(strcmp(long_options[option_index].name,"ptable-size") == 0){
                                char *end;
                                uint64_t desired = strtoull(optarg,&end,10);
@@ -6171,7 +6169,7 @@ void menu() {
         printf("-v value    Search for vanity Address, only with -m address and rmd160\n");
         printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
        printf("--mapped    Force use of a memory-mapped file for bP table\n");
-       printf("--ptable[=file]   Path to backing file for mapped bP table\n");
+       printf("--ptable <file>   Path to backing file for mapped bP table (also --ptable=<file>)\n");
        printf("--ptable-size sz  Preallocate sz bytes for mapped bP table (supports K/M/G/T)\n");
        printf("--tmpdir dir     Directory for temporary files\n");
         printf("\nValid n and maximum k values:\n");
