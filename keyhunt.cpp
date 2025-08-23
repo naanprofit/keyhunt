@@ -885,7 +885,7 @@ int main(int argc, char **argv)	{
        }
 
        if (FLAGLOADPTABLE && !bptable_filename) {
-               fprintf(stderr, "[E] --load-ptable requires --ptable=<file> or --ptable <file>\n");
+               fprintf(stderr, "--load-ptable requires --ptable <file>\n");
                exit(EXIT_FAILURE);
        }
 
@@ -1565,7 +1565,7 @@ int main(int argc, char **argv)	{
                        const char *fname = bptable_filename;
                        if(fname){
                                if(FLAGLOADPTABLE){
-                                       bptable_fd = open(fname,O_RDWR);
+                                       bptable_fd = open(fname,O_RDONLY);
                                        if(bptable_fd < 0){
                                                fprintf(stderr,"[E] Cannot open bP table file\n");
                                                exit(EXIT_FAILURE);
@@ -1580,6 +1580,7 @@ int main(int argc, char **argv)	{
                                                fprintf(stderr,"[E] Existing bP table file too small\n");
                                                exit(EXIT_FAILURE);
                                        }
+                                       FLAGREADEDFILE3 = 1;
                                }else{
                                        bptable_fd = open(fname,O_RDWR | O_CREAT,0600);
                                        if(bptable_fd < 0){
@@ -1612,7 +1613,8 @@ int main(int argc, char **argv)	{
                                        }
                                }
                        }
-                       void *map = mmap(NULL,map_bytes,PROT_READ|PROT_WRITE,MAP_SHARED,bptable_fd,0);
+                       int prot = FLAGLOADPTABLE ? PROT_READ : (PROT_READ|PROT_WRITE);
+                       void *map = mmap(NULL,map_bytes,prot,MAP_SHARED,bptable_fd,0);
                        if(map == MAP_FAILED){
                                fprintf(stderr,"[E] mmap failed for bP table\n");
                                exit(EXIT_FAILURE);
@@ -1872,7 +1874,7 @@ int main(int argc, char **argv)	{
 			
 		}
 		
-		if(!FLAGREADEDFILE1 || !FLAGREADEDFILE2 || !FLAGREADEDFILE3 || !FLAGREADEDFILE4)	{
+		if(!FLAGLOADPTABLE && (!FLAGREADEDFILE1 || !FLAGREADEDFILE2 || !FLAGREADEDFILE3 || !FLAGREADEDFILE4))	{
 			if(FLAGREADEDFILE1 == 1)	{
 				/* 
 					We need just to make File 2 to File 4 this is
