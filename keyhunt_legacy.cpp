@@ -309,6 +309,7 @@ uint64_t bptable_size_override = 0;
 int bptable_fd = -1;
 uint64_t bptable_bytes = 0;
 int FLAGBPTABLEMAPPED = 0;
+int FLAGLOADPTABLE = 0;
 char bptable_tmpfile[4096];
 const char *tmpdir_path = NULL;
 
@@ -511,6 +512,7 @@ int main(int argc, char **argv)	{
                {"mapped", optional_argument, 0, 0},
                {"ptable", optional_argument, 0, 0},
                {"ptable-size", required_argument, 0, 0},
+               {"load-ptable", no_argument, 0, 0},
                {"tmpdir", required_argument, 0, 0},
                {0, 0, 0, 0}
        };
@@ -538,6 +540,8 @@ int main(int argc, char **argv)	{
                                        }
                                }
                                bptable_size_override = desired;
+                       } else if(strcmp(long_options[option_index].name,"load-ptable") == 0){
+                               FLAGLOADPTABLE = 1;
                        } else if(strcmp(long_options[option_index].name,"tmpdir") == 0){
                                tmpdir_path = optarg;
                        }
@@ -1457,7 +1461,35 @@ int main(int argc, char **argv)	{
                        }
                        const char *fname = bptable_filename;
                        if(fname){
-                               bptable_fd = open(fname,O_RDWR | O_CREAT,0600);
+                               if(FLAGLOADPTABLE){
+                                       bptable_fd = open(fname,O_RDWR);
+                                       if(bptable_fd < 0){
+                                               fprintf(stderr,"[E] Cannot open bP table file\n");
+                                               exit(EXIT_FAILURE);
+                                       }
+                                       struct stat st;
+                                       if(fstat(bptable_fd,&st) != 0){
+                                               fprintf(stderr,"[E] Cannot stat bP table file\n");
+                                               exit(EXIT_FAILURE);
+                                       }
+                                       map_bytes = st.st_size;
+                                       if(map_bytes < bytes){
+                                               fprintf(stderr,"[E] Existing bP table file too small\n");
+                                               exit(EXIT_FAILURE);
+                                       }
+                               }else{
+                                       bptable_fd = open(fname,O_RDWR | O_CREAT,0600);
+                                       if(bptable_fd < 0){
+                                               fprintf(stderr,"[E] Cannot create bP table file\n");
+                                               exit(EXIT_FAILURE);
+                                       }
+                                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                                               if(ftruncate(bptable_fd,map_bytes) != 0){
+                                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                                       exit(EXIT_FAILURE);
+                                               }
+                                       }
+                               }
                        }else{
                                const char *tmp = tmpdir_path;
                                if(!tmp || !*tmp) tmp = getenv("TMPDIR");
@@ -1466,15 +1498,15 @@ int main(int argc, char **argv)	{
                                if(!tmp || !*tmp) tmp = "/tmp";
                                snprintf(bptable_tmpfile,sizeof(bptable_tmpfile),"%s/bptableXXXXXX",tmp);
                                bptable_fd = mkstemp(bptable_tmpfile);
-                       }
-                       if(bptable_fd < 0){
-                               fprintf(stderr,"[E] Cannot create bP table file\n");
-                               exit(EXIT_FAILURE);
-                       }
-                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
-                               if(ftruncate(bptable_fd,map_bytes) != 0){
-                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                               if(bptable_fd < 0){
+                                       fprintf(stderr,"[E] Cannot create bP table file\n");
                                        exit(EXIT_FAILURE);
+                               }
+                               if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                                       if(ftruncate(bptable_fd,map_bytes) != 0){
+                                               fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                               exit(EXIT_FAILURE);
+                                       }
                                }
                        }
                        void *map = mmap(NULL,map_bytes,PROT_READ|PROT_WRITE,MAP_SHARED,bptable_fd,0);
@@ -1485,7 +1517,9 @@ int main(int argc, char **argv)	{
                        bPtable = (struct bsgs_xvalue*)map;
                        bptable_bytes = map_bytes;
                        FLAGBPTABLEMAPPED = 1;
-                       memset(bPtable,0,bptable_bytes);
+                       if(!FLAGLOADPTABLE){
+                               memset(bPtable,0,bptable_bytes);
+                       }
 #endif
                }else{
                        bPtable = (struct bsgs_xvalue*) malloc(bytes);
@@ -6173,6 +6207,7 @@ void menu() {
        printf("--mapped    Force use of a memory-mapped file for bP table\n");
        printf("--ptable[=file]   Path to backing file for mapped bP table\n");
        printf("--ptable-size sz  Preallocate sz bytes for mapped bP table (supports K/M/G/T)\n");
+       printf("--load-ptable    Load existing bP table file instead of creating new\n");
        printf("--tmpdir dir     Directory for temporary files\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
