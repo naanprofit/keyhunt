@@ -831,10 +831,15 @@ int main(int argc, char **argv)	{
 				fprintf(stderr,"[E] Unknow opcion -%c\n",c);
 				exit(EXIT_FAILURE);
 			break;
-		}
-	}
-	//if(FLAGDEBUG) { printf("[D] File: %s Line %i\n",__FILE__,__LINE__); fflush(stdout); }
-    uint64_t nk_n = 0x100000000000ULL;
+                }
+        }
+       if (FLAGLOADPTABLE && !bptable_filename) {
+               fprintf(stderr, "[E] --load-ptable requires --ptable <file>\n");
+               exit(EXIT_FAILURE);
+       }
+
+       //if(FLAGDEBUG) { printf("[D] File: %s Line %i\n",__FILE__,__LINE__); fflush(stdout); }
+   uint64_t nk_n = 0x100000000000ULL;
     if(FLAG_N) {
         if(str_N[0] == '0' && (str_N[1] == 'x' || str_N[1] == 'X')) {
             nk_n = strtoull(str_N+2, NULL, 16);
