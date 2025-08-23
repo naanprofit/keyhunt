@@ -885,7 +885,7 @@ int main(int argc, char **argv)	{
        }
 
        if (FLAGLOADPTABLE && !bptable_filename) {
-               fprintf(stderr, "[E] --load-ptable requires --ptable <file>\n");
+               fprintf(stderr, "[E] --load-ptable requires --ptable=<file> or --ptable <file>\n");
                exit(EXIT_FAILURE);
        }
 
@@ -6070,9 +6070,9 @@ void menu() {
        printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
        printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
-       printf("--ptable <file>   Use a memory-mapped file for the bP table (also --ptable=<file>)\n");
+       printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
        printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
-       printf("--load-ptable    Load existing bP table file instead of creating new\n");
+       printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
        printf("--tmpdir dir     Directory for temporary files\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
