@@ -881,14 +881,19 @@ int main(int argc, char **argv)	{
 				fprintf(stderr,"[E] Unknow opcion -%c\n",c);
 				exit(EXIT_FAILURE);
 			break;
-		}
-        }
+               }
+       }
 
-        if (FLAGCREATEMAPPED) {
-                if (!mapped_entries_override) {
-                        fprintf(stderr, "[E] --create-mapped requires size via argument or --bloom-bytes\n");
-                        exit(EXIT_FAILURE);
-                }
+       if (FLAGLOADPTABLE && !bptable_filename) {
+               fprintf(stderr, "[E] --load-ptable requires --ptable <file>\n");
+               exit(EXIT_FAILURE);
+       }
+
+       if (FLAGCREATEMAPPED) {
+               if (!mapped_entries_override) {
+                       fprintf(stderr, "[E] --create-mapped requires size via argument or --bloom-bytes\n");
+                       exit(EXIT_FAILURE);
+               }
                 const char *mapname = mapped_filename ? mapped_filename : "bloom.dat";
                 uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
                 long double error = mapped_error_override ? mapped_error_override : 0.000001L;
