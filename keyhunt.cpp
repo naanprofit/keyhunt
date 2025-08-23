@@ -521,7 +521,7 @@ int main(int argc, char **argv)	{
                {"mapped", optional_argument, 0, 0},
                {"mapped-size", required_argument, 0, 0},
                {"mapped-chunks", required_argument, 0, 0},
-               {"ptable", optional_argument, 0, 0},
+               {"ptable", required_argument, 0, 0},
                {"ptable-size", required_argument, 0, 0},
                {"load-ptable", no_argument, 0, 0},
                {"bloom-bytes", required_argument, 0, 0},
@@ -556,10 +556,8 @@ int main(int argc, char **argv)	{
                       } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
                               FLAGMAPPED = 1;
                               mapped_chunks = strtoul(optarg, NULL, 10);
-                      } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
-                              if (optarg) {
-                                      bptable_filename = optarg;
-                              }
+                     } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
+                             bptable_filename = optarg;
                       } else if (strcmp(long_options[option_index].name, "ptable-size") == 0) {
                               char *end;
                               uint64_t desired = strtoull(optarg, &end, 10);
@@ -6067,7 +6065,7 @@ void menu() {
        printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
        printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
-       printf("--ptable[=file]   Use a memory-mapped file for the bP table\n");
+       printf("--ptable <file>   Use a memory-mapped file for the bP table (also --ptable=<file>)\n");
        printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
        printf("--load-ptable    Load existing bP table file instead of creating new\n");
        printf("--tmpdir dir     Directory for temporary files\n");
