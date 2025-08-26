@@ -42,6 +42,9 @@ inline static int test_bit_set_bit(struct bloom *bloom, uint64_t bit, int set_bi
     uint64_t chunk = byte / bloom->chunk_bytes;
     uint64_t offset = byte % bloom->chunk_bytes;
     uint8_t *bf = bloom->bf_chunks[chunk];
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_prefetch(&bf[offset], 0, 1);
+#endif
     uint8_t c = bf[offset];
     uint8_t mask = 1 << (bit % 8);
     if (c & mask) {
@@ -54,6 +57,9 @@ inline static int test_bit_set_bit(struct bloom *bloom, uint64_t bit, int set_bi
     }
   } else {
     uint8_t *bf = bloom->bf;
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_prefetch(&bf[byte], 0, 1);
+#endif
     uint8_t c = bf[byte];
     uint8_t mask = 1 << (bit % 8);
     if (c & mask) {
@@ -73,7 +79,11 @@ inline static int test_bit(struct bloom *bloom, uint64_t bit)
   if (bloom->mapped_chunks > 1 && bloom->bf_chunks) {
     uint64_t chunk = byte / bloom->chunk_bytes;
     uint64_t offset = byte % bloom->chunk_bytes;
-    uint8_t c = bloom->bf_chunks[chunk][offset];
+    uint8_t *bf = bloom->bf_chunks[chunk];
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_prefetch(&bf[offset], 0, 1);
+#endif
+    uint8_t c = bf[offset];
     uint8_t mask = 1 << (bit % 8);
     if (c & mask) {
       return 1;
@@ -81,7 +91,11 @@ inline static int test_bit(struct bloom *bloom, uint64_t bit)
       return 0;
     }
   } else {
-    uint8_t c = bloom->bf[byte];
+    uint8_t *bf = bloom->bf;
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_prefetch(&bf[byte], 0, 1);
+#endif
+    uint8_t c = bf[byte];
     uint8_t mask = 1 << (bit % 8);
     if (c & mask) {
       return 1;
@@ -98,12 +112,15 @@ static int bloom_check_add(struct bloom * bloom, const void * buffer, int len, i
     return -1;
   }
   uint8_t hits = 0;
-  uint64_t a = XXH64(buffer, len, 0x59f2815b16f81798);
-  uint64_t b = XXH64(buffer, len, a);
+  XXH128_hash_t __h = XXH3_128bits(buffer, len);
+  uint64_t a = __h.low64;
+  uint64_t b = (__h.high64 << 1) | 1; // ensure odd step
+  uint64_t mask = 0;
+  if ((bloom->bits & (bloom->bits - 1)) == 0) { mask = bloom->bits - 1; }
   uint64_t x;
   uint8_t i;
   for (i = 0; i < bloom->hashes; i++) {
-    x = (a + b*i) % bloom->bits;
+    x = mask ? ((a + b*i) & mask) : ((a + b*i) % bloom->bits);
     if (test_bit_set_bit(bloom, x, add)) {
       hits++;
     } else if (!add) {
@@ -145,6 +162,16 @@ int bloom_init2(struct bloom * bloom, uint64_t entries, long double error)
     bloom->bytes +=1;
   }
 
+  /* Align bits to next power-of-two to enable fast masking instead of modulo */
+  if ((bloom->bits & (bloom->bits - 1)) != 0) {
+    uint64_t v = bloom->bits;
+    v--;
+    v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16; v |= v >> 32;
+    v++;
+    bloom->bits = v;
+    bloom->bytes = v >> 3;
+  }
+
   bloom->hashes = (uint8_t)ceil(0.693147180559945 * bloom->bpe);  // ln(2)
   
   bloom->bf = (uint8_t *)calloc(bloom->bytes, sizeof(uint8_t));
@@ -165,12 +192,15 @@ int bloom_check(struct bloom * bloom, const void * buffer, int len)
     return -1;
   }
   uint8_t hits = 0;
-  uint64_t a = XXH64(buffer, len, 0x59f2815b16f81798);
-  uint64_t b = XXH64(buffer, len, a);
+  XXH128_hash_t __h = XXH3_128bits(buffer, len);
+  uint64_t a = __h.low64;
+  uint64_t b = (__h.high64 << 1) | 1; // ensure odd step
+  uint64_t mask = 0;
+  if ((bloom->bits & (bloom->bits - 1)) == 0) { mask = bloom->bits - 1; }
   uint64_t x;
   uint8_t i;
   for (i = 0; i < bloom->hashes; i++) {
-    x = (a + b*i) % bloom->bits;
+    x = mask ? ((a + b*i) & mask) : ((a + b*i) % bloom->bits);
     if (test_bit(bloom, x)) {
       hits++;
     } else {
@@ -356,6 +386,12 @@ int bloom_load(struct bloom * bloom, char * filename)
         uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
         close(cfd);
         if (map == MAP_FAILED) { rv = 12; goto load_error_chunks; }
+#ifdef __linux__
+        madvise(map, cbytes, MADV_RANDOM);
+#ifdef MADV_HUGEPAGE
+        madvise(map, cbytes, MADV_HUGEPAGE);
+#endif
+#endif
         bloom->bf_chunks[i] = map;
       }
       bloom->bf = bloom->bf_chunks[0];
@@ -366,6 +402,12 @@ int bloom_load(struct bloom * bloom, char * filename)
       uint8_t *map = (uint8_t*)mmap(NULL, bloom->bytes, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, offset);
       close(cfd);
       if (map == MAP_FAILED) { rv = 12; goto load_error; }
+#ifdef __linux__
+      madvise(map, bloom->bytes, MADV_RANDOM);
+#ifdef MADV_HUGEPAGE
+      madvise(map, bloom->bytes, MADV_HUGEPAGE);
+#endif
+#endif
       bloom->bf = map;
     }
   } else {
@@ -582,6 +624,16 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
     bloom->bytes += 1;
   }
 
+  /* Align bits to next power-of-two for fast masking */
+  if ((bloom->bits & (bloom->bits - 1)) != 0) {
+    uint64_t v = bloom->bits;
+    v--;
+    v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16; v |= v >> 32;
+    v++;
+    bloom->bits = v;
+    bloom->bytes = v >> 3;
+  }
+
   bloom->hashes = (uint8_t)ceil(0.693147180559945 * bloom->bpe); // ln(2)
 
   if (chunks < 1) {
@@ -658,6 +710,12 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
       return 1;
     }
     close(fd);
+#ifdef __linux__
+    madvise(map, cbytes, MADV_RANDOM);
+#ifdef MADV_HUGEPAGE
+    madvise(map, cbytes, MADV_HUGEPAGE);
+#endif
+#endif
     if (chunks > 1) {
       bloom->bf_chunks[i] = map;
     } else {
