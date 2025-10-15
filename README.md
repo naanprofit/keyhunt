@@ -53,12 +53,13 @@ in memory and will warn if it does not fit in the available RAM.
 The BSGS stage uses a bP table that can consume large amounts of RAM. If the
 required size exceeds the available physical memory, or when `--mapped` is
 supplied, keyhunt stores this table in a temporary file and maps it into
-memory.  `--ptable[=file]` selects the backing file path and
-`--ptable-size <size>` preallocates the file (accepting `K`, `M`, `G` and `T`
-suffixes).  The mapped table is flushed on shutdown and the temporary file is
-removed unless a path was explicitly provided. By default the file is created
-in the system temporary directory; use `--tmpdir <dir>` or set `TEMP`/`TMPDIR`
-to choose a different location.
+memory. Use `--ptable=<file>` or `--ptable <file>` to select the backing file
+path and `--ptable-size <size>` preallocates it (accepting `K`, `M`, `G` and `T`
+suffixes). The mapped table is flushed on shutdown and the temporary file is
+removed unless a path was explicitly provided. To reuse an existing bP table,
+combine `--load-ptable` with `--ptable`. By default the file is created in the
+system temporary directory; use `--tmpdir <dir>` or set `TEMP`/`TMPDIR` to
+choose a different location.
 
 ## Free Code
 
