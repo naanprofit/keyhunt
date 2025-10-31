@@ -69,6 +69,33 @@ email: albertobsd@gmail.com
 #define SEARCH_BOTH 2
 
 uint32_t  THREADBPWORKLOAD = 1048576;
+static const size_t kIOBufferSize = 4 * 1024 * 1024;
+
+static inline void tune_file_stream(FILE *stream, size_t bufsize, bool sequential_hint) {
+        if(!stream){
+                return;
+        }
+        if(bufsize){
+                setvbuf(stream, NULL, _IOFBF, bufsize);
+        }
+#if !defined(_WIN64) || defined(__CYGWIN__)
+        int fd = fileno(stream);
+        if(fd >= 0){
+#if defined(POSIX_FADV_SEQUENTIAL)
+                if(sequential_hint){
+                        posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+                }
+#endif
+#if defined(POSIX_FADV_WILLNEED)
+                if(sequential_hint){
+                        posix_fadvise(fd, 0, 0, POSIX_FADV_WILLNEED);
+                }
+#endif
+        }
+#else
+        (void)sequential_hint;
+#endif
+}
 
 struct checksumsha256	{
 	char data[32];
@@ -1622,8 +1649,25 @@ int main(int argc, char **argv)	{
                        bPtable = (struct bsgs_xvalue*)map;
                        bptable_bytes = map_bytes;
                        FLAGBPTABLEMAPPED = 1;
+#if !defined(_WIN64) || defined(__CYGWIN__)
+                       if(bptable_bytes){
+#if defined(MADV_WILLNEED)
+                               madvise(bPtable, bptable_bytes, MADV_WILLNEED);
+#endif
+#if defined(MADV_SEQUENTIAL)
+                               madvise(bPtable, bptable_bytes, MADV_SEQUENTIAL);
+#endif
+                       }
+#endif
                        if(!FLAGLOADPTABLE){
+#if defined(_WIN64) && !defined(__CYGWIN__)
                                memset(bPtable,0,bptable_bytes);
+#else
+                               /* Newly created files are already zeroed; avoid an expensive memset on huge mappings. */
+                               if(bptable_bytes < (1ULL<<20)){
+                                       memset(bPtable,0,bptable_bytes);
+                               }
+#endif
                        }
 #endif
                }else{
@@ -1636,7 +1680,8 @@ int main(int argc, char **argv)	{
 			/*Reading file for 1st bloom filter */
 
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_4_%" PRIu64 ".blm",bsgs_m);
-			fd_aux1 = fopen(buffer_bloom_file,"rb");
+                        fd_aux1 = fopen(buffer_bloom_file,"rb");
+                        tune_file_stream(fd_aux1, kIOBufferSize, true);
 			if(fd_aux1 != NULL)	{
 				printf("[+] Reading bloom filter from file %s ",buffer_bloom_file);
 				fflush(stdout);
@@ -1674,7 +1719,8 @@ int main(int argc, char **argv)	{
 				fclose(fd_aux1);
 				memset(buffer_bloom_file,0,1024);
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_3_%" PRIu64 ".blm",bsgs_m);
-				fd_aux1 = fopen(buffer_bloom_file,"rb");
+                                fd_aux1 = fopen(buffer_bloom_file,"rb");
+                                tune_file_stream(fd_aux1, kIOBufferSize, true);
 				if(fd_aux1 != NULL)	{
 					printf("[W] Unused file detected %s you can delete it without worry\n",buffer_bloom_file);
 					fclose(fd_aux1);
@@ -1683,7 +1729,8 @@ int main(int argc, char **argv)	{
 			}
 			else	{	/*Checking for old file    keyhunt_bsgs_3_   */
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_3_%" PRIu64 ".blm",bsgs_m);
-				fd_aux1 = fopen(buffer_bloom_file,"rb");
+                                fd_aux1 = fopen(buffer_bloom_file,"rb");
+                                tune_file_stream(fd_aux1, kIOBufferSize, true);
 				if(fd_aux1 != NULL)	{
 					printf("[+] Reading bloom filter from file %s ",buffer_bloom_file);
 					fflush(stdout);
@@ -1739,7 +1786,8 @@ int main(int argc, char **argv)	{
 			
 			/*Reading file for 2nd bloom filter */
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_6_%" PRIu64 ".blm",bsgs_m2);
-			fd_aux2 = fopen(buffer_bloom_file,"rb");
+                        fd_aux2 = fopen(buffer_bloom_file,"rb");
+                        tune_file_stream(fd_aux2, kIOBufferSize, true);
 			if(fd_aux2 != NULL)	{
 				printf("[+] Reading bloom filter from file %s ",buffer_bloom_file);
 				fflush(stdout);
@@ -1778,14 +1826,16 @@ int main(int argc, char **argv)	{
 				printf(" Done!\n");
 				memset(buffer_bloom_file,0,1024);
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_5_%" PRIu64 ".blm",bsgs_m2);
-				fd_aux2 = fopen(buffer_bloom_file,"rb");
+                                fd_aux2 = fopen(buffer_bloom_file,"rb");
+                                tune_file_stream(fd_aux2, kIOBufferSize, true);
 				if(fd_aux2 != NULL)	{
 					printf("[W] Unused file detected %s you can delete it without worry\n",buffer_bloom_file);
 					fclose(fd_aux2);
 				}
 				memset(buffer_bloom_file,0,1024);
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_1_%" PRIu64 ".blm",bsgs_m2);
-				fd_aux2 = fopen(buffer_bloom_file,"rb");
+                                fd_aux2 = fopen(buffer_bloom_file,"rb");
+                                tune_file_stream(fd_aux2, kIOBufferSize, true);
 				if(fd_aux2 != NULL)	{
 					printf("[W] Unused file detected %s you can delete it without worry\n",buffer_bloom_file);
 					fclose(fd_aux2);
@@ -1798,7 +1848,8 @@ int main(int argc, char **argv)	{
 			
 			/*Reading file for bPtable */
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_2_%" PRIu64 ".tbl",bsgs_m3);
-			fd_aux3 = fopen(buffer_bloom_file,"rb");
+                        fd_aux3 = fopen(buffer_bloom_file,"rb");
+                        tune_file_stream(fd_aux3, kIOBufferSize, true);
 			if(fd_aux3 != NULL)	{
 				printf("[+] Reading bP Table from file %s .",buffer_bloom_file);
 				fflush(stdout);
@@ -1834,7 +1885,8 @@ int main(int argc, char **argv)	{
 			
 			/*Reading file for 3rd bloom filter */
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_7_%" PRIu64 ".blm",bsgs_m3);
-			fd_aux2 = fopen(buffer_bloom_file,"rb");
+                        fd_aux2 = fopen(buffer_bloom_file,"rb");
+                        tune_file_stream(fd_aux2, kIOBufferSize, true);
 			if(fd_aux2 != NULL)	{
 				printf("[+] Reading bloom filter from file %s ",buffer_bloom_file);
 				fflush(stdout);
@@ -2155,7 +2207,8 @@ int main(int argc, char **argv)	{
 				
 				/* Writing file for 1st bloom filter */
 				
-				fd_aux1 = fopen(buffer_bloom_file,"wb");
+                                fd_aux1 = fopen(buffer_bloom_file,"wb");
+                                tune_file_stream(fd_aux1, kIOBufferSize, true);
 				if(fd_aux1 != NULL)	{
 					printf("[+] Writing bloom filter to file %s ",buffer_bloom_file);
 					fflush(stdout);
@@ -2193,7 +2246,8 @@ int main(int argc, char **argv)	{
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_6_%" PRIu64 ".blm",bsgs_m2);
 								
 				/* Writing file for 2nd bloom filter */
-				fd_aux2 = fopen(buffer_bloom_file,"wb");
+                                fd_aux2 = fopen(buffer_bloom_file,"wb");
+                                tune_file_stream(fd_aux2, kIOBufferSize, true);
 				if(fd_aux2 != NULL)	{
 					printf("[+] Writing bloom filter to file %s ",buffer_bloom_file);
 					fflush(stdout);
@@ -2230,7 +2284,8 @@ int main(int argc, char **argv)	{
 			if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)    {
                                 /* Writing file for bPtable */
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_2_%" PRIu64 ".tbl",bsgs_m3);
-				fd_aux3 = fopen(buffer_bloom_file,"wb");
+                                fd_aux3 = fopen(buffer_bloom_file,"wb");
+                                tune_file_stream(fd_aux3, kIOBufferSize, true);
 				if(fd_aux3 != NULL)	{
 					printf("[+] Writing bP Table to file %s .. ",buffer_bloom_file);
 					fflush(stdout);
@@ -2256,7 +2311,8 @@ int main(int argc, char **argv)	{
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_7_%" PRIu64 ".blm",bsgs_m3);
 								
 				/* Writing file for 3rd bloom filter */
-				fd_aux2 = fopen(buffer_bloom_file,"wb");
+                                fd_aux2 = fopen(buffer_bloom_file,"wb");
+                                tune_file_stream(fd_aux2, kIOBufferSize, true);
 				if(fd_aux2 != NULL)	{
 					printf("[+] Writing bloom filter to file %s ",buffer_bloom_file);
 					fflush(stdout);
@@ -2523,7 +2579,12 @@ int main(int argc, char **argv)	{
        printf("\nEnd\n");
        if (FLAGBPTABLEMAPPED) {
 #if !defined(_WIN64) || defined(__CYGWIN__)
-               msync(bPtable, bptable_bytes, MS_SYNC);
+               if(bptable_bytes){
+                       msync(bPtable, bptable_bytes, MS_ASYNC);
+#if defined(POSIX_FADV_DONTNEED)
+                       posix_fadvise(bptable_fd, 0, bptable_bytes, POSIX_FADV_DONTNEED);
+#endif
+               }
                munmap(bPtable, bptable_bytes);
                close(bptable_fd);
                if(!bptable_filename){
@@ -6467,7 +6528,8 @@ bool readFileAddress(char *fileName)	{
 		}
 		tohex_dst((char*)checksum,4,(char*)hexPrefix); // we save the prefix (last fourt bytes) hexadecimal value
 		snprintf(fileBloomName,30,"data_%s.dat",hexPrefix);
-		fileDescriptor = fopen(fileBloomName,"rb");
+                fileDescriptor = fopen(fileBloomName,"rb");
+                tune_file_stream(fileDescriptor, kIOBufferSize, true);
 		if(fileDescriptor != NULL)	{
 			printf("[+] Reading file %s\n",fileBloomName);
 		
@@ -7119,7 +7181,8 @@ void writeFileIfNeeded(const char *fileName)	{
 		}
 		tohex_dst((char*)checksum,4,(char*)hexPrefix); // we save the prefix (last fourt bytes) hexadecimal value
 		snprintf(fileBloomName,30,"data_%s.dat",hexPrefix);
-		fileDescriptor = fopen(fileBloomName,"wb");
+                fileDescriptor = fopen(fileBloomName,"wb");
+                tune_file_stream(fileDescriptor, kIOBufferSize, true);
 		dataSize = N * (sizeof(struct address_value));
 		printf("[D] size data %li\n",dataSize);
 		if(fileDescriptor != NULL)	{
