@@ -91,6 +91,34 @@ inline static int test_bit(struct bloom *bloom, uint64_t bit)
   }
 }
 
+#if !defined(_WIN64)
+static inline void bloom_advise_fd(int fd, off_t length) {
+#if defined(POSIX_FADV_SEQUENTIAL)
+  if (fd >= 0) {
+    posix_fadvise(fd, 0, length, POSIX_FADV_SEQUENTIAL);
+  }
+#endif
+#if defined(POSIX_FADV_WILLNEED)
+  if (fd >= 0) {
+    posix_fadvise(fd, 0, length, POSIX_FADV_WILLNEED);
+  }
+#endif
+}
+
+static inline void bloom_advise_map(void *addr, size_t length) {
+#if defined(MADV_WILLNEED)
+  if (addr && length) {
+    madvise(addr, length, MADV_WILLNEED);
+  }
+#endif
+#if defined(MADV_SEQUENTIAL)
+  if (addr && length) {
+    madvise(addr, length, MADV_SEQUENTIAL);
+  }
+#endif
+}
+#endif
+
 static int bloom_check_add(struct bloom * bloom, const void * buffer, int len, int add)
 {
   if (bloom->ready == 0) {
@@ -353,9 +381,15 @@ int bloom_load(struct bloom * bloom, char * filename)
         snprintf(fname, sizeof(fname), "%s.%u", filename, i);
         int cfd = open(fname, O_RDWR);
         if (cfd < 0) { rv = 11; goto load_error_chunks; }
-        uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
+        bloom_advise_fd(cfd, (off_t)cbytes);
+        int map_flags = MAP_SHARED;
+#ifdef MAP_POPULATE
+        map_flags |= MAP_POPULATE;
+#endif
+        uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, map_flags, cfd, 0);
         close(cfd);
         if (map == MAP_FAILED) { rv = 12; goto load_error_chunks; }
+        bloom_advise_map(map, (size_t)cbytes);
         bloom->bf_chunks[i] = map;
       }
       bloom->bf = bloom->bf_chunks[0];
@@ -363,9 +397,15 @@ int bloom_load(struct bloom * bloom, char * filename)
       off_t offset = strlen(BLOOM_MAGIC) + sizeof(uint16_t) + sizeof(struct bloom);
       int cfd = open(filename, O_RDWR);
       if (cfd < 0) { rv = 11; goto load_error; }
-      uint8_t *map = (uint8_t*)mmap(NULL, bloom->bytes, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, offset);
+      bloom_advise_fd(cfd, (off_t)bloom->bytes);
+      int map_flags = MAP_SHARED;
+#ifdef MAP_POPULATE
+      map_flags |= MAP_POPULATE;
+#endif
+      uint8_t *map = (uint8_t*)mmap(NULL, bloom->bytes, PROT_READ | PROT_WRITE, map_flags, cfd, offset);
       close(cfd);
       if (map == MAP_FAILED) { rv = 12; goto load_error; }
+      bloom_advise_map(map, (size_t)bloom->bytes);
       bloom->bf = map;
     }
   } else {
@@ -489,11 +529,17 @@ int bloom_load_mmap(struct bloom *bloom, const char *filename, uint32_t chunks)
       goto load_error;
     }
     uint64_t cbytes = (uint64_t)st.st_size;
-    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    bloom_advise_fd(fd, (off_t)cbytes);
+    int map_flags = MAP_SHARED;
+#ifdef MAP_POPULATE
+    map_flags |= MAP_POPULATE;
+#endif
+    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, map_flags, fd, 0);
     close(fd);
     if (map == MAP_FAILED) {
       goto load_error;
     }
+    bloom_advise_map(map, (size_t)cbytes);
     if (chunks > 1) {
       bloom->bf_chunks[i] = map;
       sizes[i] = cbytes;
@@ -649,7 +695,12 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
       }
     }
 
-    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    bloom_advise_fd(fd, (off_t)cbytes);
+    int map_flags = MAP_SHARED;
+#ifdef MAP_POPULATE
+    map_flags |= MAP_POPULATE;
+#endif
+    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, map_flags, fd, 0);
     if (map == MAP_FAILED) {
       int err = errno;
       close(fd);
@@ -658,6 +709,7 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
       return 1;
     }
     close(fd);
+    bloom_advise_map(map, (size_t)cbytes);
     if (chunks > 1) {
       bloom->bf_chunks[i] = map;
     } else {
