@@ -703,9 +703,13 @@ int main(int argc, char **argv)	{
                         exit(EXIT_FAILURE);
                 }
 
-                bPtable = (struct bsgs_xvalue*) malloc(bytes);
-                checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
-                memset(bPtable,0,bytes);
+               bPtable = (struct bsgs_xvalue*) malloc(bytes);
+               checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
+               /*
+                * The distributed loader fills every slot in the table, so there is no benefit
+                * in touching the buffer here. Skipping the memset keeps start-up time low even
+                * for very large tables.
+                */
 		
 		if(FLAGSAVEREADFILE)	{
 			/*Reading file for 1st bloom filter */
