@@ -1554,13 +1554,14 @@ int main(int argc, char **argv)	{
                }
                if(use_mmap){
 #if defined(_WIN64) && !defined(__CYGWIN__)
-                       bPtable = (struct bsgs_xvalue*) malloc(bytes);
-                       checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
-                       memset(bPtable,0,bytes);
+                      bPtable = (struct bsgs_xvalue*) malloc(bytes);
+                      checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
+                      /* Memory is populated densely right after allocation; zeroing here only
+                       * slows down large runs. */
 #else
-                       uint64_t map_bytes = bytes;
-                       if(bptable_size_override && bptable_size_override > map_bytes){
-                               map_bytes = bptable_size_override;
+                      uint64_t map_bytes = bytes;
+                      if(bptable_size_override && bptable_size_override > map_bytes){
+                              map_bytes = bptable_size_override;
                        }
                        const char *fname = bptable_filename;
                        if(fname){
@@ -1622,14 +1623,19 @@ int main(int argc, char **argv)	{
                        bPtable = (struct bsgs_xvalue*)map;
                        bptable_bytes = map_bytes;
                        FLAGBPTABLEMAPPED = 1;
-                       if(!FLAGLOADPTABLE){
-                               memset(bPtable,0,bptable_bytes);
-                       }
+                       /*
+                        * Newly created mappings are already zero-filled by the kernel, so avoid
+                        * touching the entire region here. This keeps creation fast when the table
+                        * spans many gigabytes. The table population code overwrites every entry
+                        * anyway, so there is no need for an explicit memset.
+                        */
+#if defined(MADV_SEQUENTIAL)
+                       madvise(bPtable, bptable_bytes, MADV_SEQUENTIAL);
+#endif
 #endif
                }else{
                        bPtable = (struct bsgs_xvalue*) malloc(bytes);
                        checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
-                       memset(bPtable,0,bytes);
                }
 		
 		if(FLAGSAVEREADFILE && !FLAGMAPPED)	{
