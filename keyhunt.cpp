@@ -13,6 +13,7 @@ email: albertobsd@gmail.com
 #include <inttypes.h>
 #include <errno.h>
 #include <ctype.h>
+#include <limits.h>
 #include "base58/libbase58.h"
 #include "rmd160/rmd160.h"
 #include "oldbloom/oldbloom.h"
@@ -536,6 +537,8 @@ int main(int argc, char **argv)	{
                               FLAGMAPPED = 1;
                               if (optarg) {
                                       mapped_filename = optarg;
+                              } else if (optind < argc && argv[optind][0] != '-') {
+                                      mapped_filename = argv[optind++];
                               }
                       } else if (strcmp(long_options[option_index].name, "mapped-size") == 0) {
                               FLAGMAPPED = 1;
@@ -584,6 +587,12 @@ int main(int argc, char **argv)	{
                               FLAGCREATEMAPPED = 1;
                               if (optarg) {
                                       uint64_t desired = strtoull(optarg, NULL, 10);
+                                      uint64_t n; uint32_t k;
+                                      bloom_entries_for_bytes(desired, &n, &k);
+                                      mapped_entries_override = n;
+                                      mapped_error_override = powl(0.5L, (long double)k);
+                              } else if (optind < argc && argv[optind][0] != '-') {
+                                      uint64_t desired = strtoull(argv[optind++], NULL, 10);
                                       uint64_t n; uint32_t k;
                                       bloom_entries_for_bytes(desired, &n, &k);
                                       mapped_entries_override = n;
@@ -1563,6 +1572,21 @@ int main(int argc, char **argv)	{
                                map_bytes = bptable_size_override;
                        }
                        const char *fname = bptable_filename;
+                       char disk_path[PATH_MAX];
+                       const char *disk_check = NULL;
+                       if (fname && strlen(fname) < sizeof(disk_path)) {
+                               strncpy(disk_path, fname, sizeof(disk_path));
+                               disk_path[sizeof(disk_path) - 1] = '\0';
+                               char *slash = strrchr(disk_path, '/');
+                               if (slash) {
+                                       if (slash == disk_path) {
+                                               slash[1] = '\0';
+                                       } else {
+                                               *slash = '\0';
+                                       }
+                                       disk_check = disk_path;
+                               }
+                       }
                        if(fname){
                                if(FLAGLOADPTABLE){
                                        bptable_fd = open(fname,O_RDONLY);
@@ -1587,11 +1611,11 @@ int main(int argc, char **argv)	{
                                                fprintf(stderr,"[E] Cannot create bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
-                                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
-                                               if(ftruncate(bptable_fd,map_bytes) != 0){
-                                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
-                                                       exit(EXIT_FAILURE);
-                                               }
+                                       const char *space_path = disk_check ? disk_check : fname;
+                                       warn_if_insufficient_disk_space(space_path, map_bytes);
+                                       if(ftruncate(bptable_fd,map_bytes) != 0){
+                                               fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                               exit(EXIT_FAILURE);
                                        }
                                }
                        }else{
@@ -1606,11 +1630,10 @@ int main(int argc, char **argv)	{
                                        fprintf(stderr,"[E] Cannot create bP table file\n");
                                        exit(EXIT_FAILURE);
                                }
-                               if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
-                                       if(ftruncate(bptable_fd,map_bytes) != 0){
-                                               fprintf(stderr,"[E] Cannot resize bP table file\n");
-                                               exit(EXIT_FAILURE);
-                                       }
+                               warn_if_insufficient_disk_space(tmp, map_bytes);
+                               if(ftruncate(bptable_fd,map_bytes) != 0){
+                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                       exit(EXIT_FAILURE);
                                }
                        }
                        int prot = FLAGLOADPTABLE ? PROT_READ : (PROT_READ|PROT_WRITE);
@@ -2523,7 +2546,9 @@ int main(int argc, char **argv)	{
        printf("\nEnd\n");
        if (FLAGBPTABLEMAPPED) {
 #if !defined(_WIN64) || defined(__CYGWIN__)
-               msync(bPtable, bptable_bytes, MS_SYNC);
+               if(!FLAGLOADPTABLE){
+                       msync(bPtable, bptable_bytes, MS_SYNC);
+               }
                munmap(bPtable, bptable_bytes);
                close(bptable_fd);
                if(!bptable_filename){
