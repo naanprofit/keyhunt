@@ -12,6 +12,15 @@ Work for Bitcoin
 Work for Ethereum
 - address
 
+## Advanced secp256k1 optimizations
+
+The secp256k1 backend now mirrors the high-performance techniques used in
+libraries such as libsecp256k1. Scalar multiplications use the GLV
+endomorphism with wNAF recoding and fixed-window tables, plus batch
+normalization of projective points. Multi-scalar workloads automatically select
+between Straus wNAF and Pippenger algorithms and take advantage of the
+negation map. These optimizations apply to both the native and GMP backends.
+
 # TL:DR
 
 - Download and build
@@ -91,6 +100,7 @@ Please install on your system
 
 - git
 - build-essential
+- libboost-dev
 
 for legacy version also you are going to need:
 
@@ -104,6 +114,7 @@ and install the tools needed to compile it
 apt update && apt upgrade
 apt install git -y
 apt install build-essential -y
+apt install libboost-dev -y
 apt install libssl-dev -y
 apt install libgmp-dev -y
 ```
@@ -129,6 +140,13 @@ make
 On ARM64 (`aarch64`) hosts the Makefile automatically sets `-march=armv8-a -mtune=generic`
 and uses the portable `hash/ripemd160.cpp` and `hash/sha256.cpp` implementations, skipping
 the SSE-specific sources.
+
+To run a quick regression test that exercises the GLV, wNAF, and multi-scalar
+paths, build and execute the dedicated self-test binary:
+
+```
+make glv-test
+```
 
 if you have problems compiling the `main` version you can compile the `legacy` version
 

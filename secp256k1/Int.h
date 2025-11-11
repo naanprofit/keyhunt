@@ -241,8 +241,12 @@ static inline uint64_t __shiftleft128(uint64_t a, uint64_t b, unsigned char n) {
 
 #if defined(__x86_64__) || defined(_M_X64)
 #ifndef _WIN64
+#ifndef _addcarry_u64
 #define _addcarry_u64(a,b,c,d) __builtin_ia32_addcarryx_u64(a,b,c,(unsigned long long*)d)
+#endif
+#ifndef _subborrow_u64
 #define _subborrow_u64(a,b,c,d) __builtin_ia32_sbb_u64(a,b,c,(unsigned long long*)d)
+#endif
 #else
 #include <intrin.h>
 #endif
