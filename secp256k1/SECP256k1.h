@@ -18,6 +18,7 @@
 #ifndef SECP256K1H
 #define SECP256K1H
 
+#include <boost/multiprecision/cpp_int.hpp>
 #include "Point.h"
 #include <vector>
 
@@ -37,8 +38,12 @@ public:
   Point ComputePublicKey(Int *privKey);
   Point NextKey(Point &key);
   bool  EC(Point &p);
-  
+
   Point ScalarMultiplication(Point &P,Int *scalar);
+  Point ScalarBaseMultiplication(const Int &scalar);
+  Point MultiScalarMul(const std::vector<Int> &scalars, const std::vector<Point> &points);
+  void  BatchNormalize(std::vector<Point> &points);
+  Point ApplyEndomorphism(const Point &p);
   
   char* GetPublicKeyHex(bool compressed, Point &p);
   void GetPublicKeyHex(bool compressed, Point &pubKey,char *dst);
@@ -70,11 +75,25 @@ public:
   Int P;                   // Prime for the finite field
   Int   order;             // Curve order
 
+  Int lambda;              // Endomorphism eigenvalue
+  Int beta;                // Field endomorphism constant
+
 private:
 
   uint8_t GetByte(char *str,int idx);
   Int GetY(Int x, bool isEven);
   Point GTable[256*32];       // Generator table
+
+  std::vector<Point> BuildFixedBaseTable(const Point &base, int window);
+  Point EvaluateWNAF(const std::vector<int8_t> &wnaf, const std::vector<Point> &precomp);
+  std::vector<int8_t> ComputeWNAF(const boost::multiprecision::cpp_int &scalar, int window);
+  Point StrausWNAF(const std::vector<Int> &scalars, const std::vector<Point> &points, int window);
+  Point PippengerMultiScalar(const std::vector<Int> &scalars, const std::vector<Point> &points, int window);
+
+  mutable bool basePrecompReady = false;
+  mutable std::vector<Point> basePrecomp;
+  mutable std::vector<Point> basePrecompLambda;
+  static constexpr int BASE_WNAF_WINDOW = 5;
 
 };
 

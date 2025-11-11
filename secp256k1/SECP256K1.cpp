@@ -17,16 +17,77 @@
 
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cassert>
+#include <cstdlib>
+#include <numeric>
+#include <boost/multiprecision/cpp_int.hpp>
 #include "SECP256k1.h"
 #include "Point.h"
 #include "../util.h"
 #include "../hash/sha256.h"
 #include "../hash/ripemd160.h"
 
+namespace {
+using boost::multiprecision::cpp_int;
+
+int HexCharToInt(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return 10 + (c - 'a');
+  }
+  if (c >= 'A' && c <= 'F') {
+    return 10 + (c - 'A');
+  }
+  return -1;
+}
+
+cpp_int HexToCpp(const char *hex) {
+  cpp_int result = 0;
+  while (*hex) {
+    if (*hex == 'x' || *hex == 'X') {
+      ++hex;
+      continue;
+    }
+    int nibble = HexCharToInt(*hex++);
+    if (nibble < 0) {
+      continue;
+    }
+    result <<= 4;
+    result += nibble;
+  }
+  return result;
+}
+
+cpp_int IntToCpp(const Int &value) {
+  unsigned char bytes[32];
+  Int tmp(const_cast<Int*>(&value));
+  tmp.Get32Bytes(bytes);
+  cpp_int result = 0;
+  for (int i = 0; i < 32; ++i) {
+    result <<= 8;
+    result += bytes[i];
+  }
+  return result;
+}
+
+const cpp_int MINUS_B1 = HexToCpp("00000000000000000000000000000000E4437ED6010E88286F547FA90ABFE4C3");
+const cpp_int MINUS_B2 = HexToCpp("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE8A280AC50774346DD765CDA83DB1562C");
+const cpp_int G1_CONST = HexToCpp("3086D221A7D46BCDE86C90E49284EB153DAA8A1471E8CA7FE893209A45DBB031");
+const cpp_int G2_CONST = HexToCpp("E4437ED6010E88286F547FA90ABFE4C4221208AC9DF506C61571B4AE8AC47F71");
+const cpp_int ROUNDING_CONST = cpp_int(1) << 383;
+
+} // namespace
+
 Secp256K1::Secp256K1() {
 }
 
 void Secp256K1::Init() {
+  basePrecompReady = false;
   // Prime for the finite field
   P.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
 
@@ -41,6 +102,9 @@ void Secp256K1::Init() {
 
   Int::InitK1(&order);
 
+  lambda.SetBase16("5363AD4CC05C30E0A5261C028812645A122E22EA20816678DF02967C1B23BD72");
+  beta.SetBase16("7AE96A2B657C07106E64479EAC3434E99CF0497512F58995C1396C28719501EE");
+
   // Compute Generator table
   Point N(G);
   for(int i = 0; i < 32; i++) {
@@ -53,32 +117,20 @@ void Secp256K1::Init() {
     GTable[i * 256 + 255] = N; // Dummy point for check function
   }
 
+  basePrecomp = BuildFixedBaseTable(G, BASE_WNAF_WINDOW);
+  Point lambdaG = ApplyEndomorphism(G);
+  basePrecompLambda = BuildFixedBaseTable(lambdaG, BASE_WNAF_WINDOW);
+  basePrecompReady = true;
+
 }
 
 Secp256K1::~Secp256K1() {
 }
 
 Point Secp256K1::ComputePublicKey(Int *privKey) {
-  int i = 0;
-  uint8_t b;
-  Point Q;
-  Q.Clear();
-  // Search first significant byte
-  for (i = 0; i < 32; i++) {
-    b = privKey->GetByte(i);
-    if(b)
-      break;
-  }
-  Q = GTable[256 * i + (b-1)];
-  i++;
-
-  for(; i < 32; i++) {
-    b = privKey->GetByte(i);
-    if(b)
-      Q = Add2(Q, GTable[256 * i + (b-1)]);
-  }
-  Q.Reduce();
-  return Q;
+  Int k(privKey);
+  k.Mod(&order);
+  return ScalarBaseMultiplication(k);
 }
 
 Point Secp256K1::NextKey(Point &key) {
@@ -108,6 +160,111 @@ Point Secp256K1::Negation(Point &p) {
   Q.y.Sub(&p.y);
   Q.z.SetInt32(1);
   return Q;
+}
+
+Point Secp256K1::ApplyEndomorphism(const Point &p) {
+  Point normalized(p);
+  if (!normalized.z.IsOne() && !normalized.z.IsZero()) {
+    normalized.Reduce();
+  }
+  Point result;
+  result.Clear();
+  result.x.ModMulK1(&normalized.x, &beta);
+  result.y.Set(&normalized.y);
+  result.z.SetInt32(1);
+  return result;
+}
+
+std::vector<Point> Secp256K1::BuildFixedBaseTable(const Point &base, int window) {
+  std::vector<Point> table;
+  if (window < 2) {
+    return table;
+  }
+  int entries = 1 << (window - 2);
+  if (entries <= 0) {
+    return table;
+  }
+
+  Point normalized(base);
+  if (!normalized.z.IsOne() && !normalized.z.IsZero()) {
+    normalized.Reduce();
+  }
+
+  table.reserve(entries);
+  Point current(normalized);
+  table.push_back(current);
+
+  if (entries == 1) {
+    return table;
+  }
+
+  Point doubled = DoubleDirect(normalized);
+  for (int i = 1; i < entries; ++i) {
+    current = AddDirect(current, doubled);
+    table.push_back(current);
+  }
+  return table;
+}
+
+std::vector<int8_t> Secp256K1::ComputeWNAF(const cpp_int &scalar, int window) {
+  std::vector<int8_t> wnaf;
+  if (scalar == 0) {
+    return wnaf;
+  }
+  cpp_int k = scalar;
+  const int window_size = 1 << window;
+  const int window_half = window_size >> 1;
+  const cpp_int mask = cpp_int(window_size - 1);
+
+  while (k != 0) {
+    int8_t digit = 0;
+    if ((k & 1) != 0) {
+      long long remainder = (k & mask).convert_to<long long>();
+      if (remainder > window_half) {
+        remainder -= window_size;
+      }
+      digit = static_cast<int8_t>(remainder);
+      k -= remainder;
+    }
+    wnaf.push_back(digit);
+    k >>= 1;
+  }
+  return wnaf;
+}
+
+Point Secp256K1::EvaluateWNAF(const std::vector<int8_t> &wnaf, const std::vector<Point> &precomp) {
+  Point result;
+  result.Clear();
+  bool initialized = false;
+  for (int i = static_cast<int>(wnaf.size()) - 1; i >= 0; --i) {
+    if (initialized) {
+      result = Double(result);
+    }
+    int digit = wnaf[i];
+    if (!digit) {
+      continue;
+    }
+    int index = (std::abs(digit) - 1) >> 1;
+    if (index < 0 || index >= static_cast<int>(precomp.size())) {
+      continue;
+    }
+    Point addend(precomp[index]);
+    if (digit < 0) {
+      addend = Negation(addend);
+    }
+    if (initialized) {
+      result = Add2(result, addend);
+    } else {
+      result = addend;
+      initialized = true;
+    }
+  }
+  if (!initialized) {
+    result.Clear();
+  } else {
+    result.Reduce();
+  }
+  return result;
 }
 
 
@@ -486,28 +643,319 @@ bool Secp256K1::EC(Point &p) {
   return _s.IsZero(); // ( ((pow2(y) - (pow3(x) + 7)) % P) == 0 );
 }
 
-Point Secp256K1::ScalarMultiplication(Point &P,Int *scalar)	{
-	Point R,Q,T;
-	int  no_of_bits, loop;
-	no_of_bits = scalar->GetBitLength();
-	R.Clear();
-	R.z.SetInt32(1);
-	if(!scalar->IsZero())	{
-		Q.Set(P);
-		if(scalar->GetBit(0) == 1)	{
-			R.Set(P);
-		}
-		for(loop = 1; loop < no_of_bits; loop++) {
-			T = Double(Q);
-			Q.Set(T);
-			T.Set(R);
-			if(scalar->GetBit(loop)){
-				R = Add(T,Q);
-			}
-		}
-	}
-	R.Reduce();
-	return R;
+void Secp256K1::BatchNormalize(std::vector<Point> &points) {
+  if (points.empty()) {
+    return;
+  }
+  std::vector<Int> prefix(points.size());
+  Int acc;
+  acc.SetInt32(1);
+  for (size_t i = 0; i < points.size(); ++i) {
+    prefix[i].Set(&acc);
+    if (!points[i].z.IsZero()) {
+      acc.ModMulK1(&points[i].z);
+    }
+  }
+  if (!acc.IsZero()) {
+    acc.ModInv();
+  }
+  for (int i = static_cast<int>(points.size()) - 1; i >= 0; --i) {
+    if (points[i].z.IsZero()) {
+      continue;
+    }
+    Int zi(points[i].z);
+    Int ziInv(acc);
+    ziInv.ModMulK1(&prefix[i]);
+    Int ziInv2;
+    ziInv2.ModSquareK1(&ziInv);
+    Int ziInv3(ziInv2);
+    ziInv3.ModMulK1(&ziInv);
+    points[i].x.ModMulK1(&ziInv2);
+    points[i].y.ModMulK1(&ziInv3);
+    points[i].z.SetInt32(1);
+    acc.ModMulK1(&zi);
+  }
+}
+
+Point Secp256K1::ScalarBaseMultiplication(const Int &scalar) {
+  Int scalarCopy(const_cast<Int*>(&scalar));
+  if (scalarCopy.IsZero()) {
+    Point infinity;
+    infinity.Clear();
+    return infinity;
+  }
+
+  cpp_int n = IntToCpp(order);
+  cpp_int k = IntToCpp(scalarCopy) % n;
+  cpp_int lambda_cpp = IntToCpp(lambda);
+
+  cpp_int c1 = (k * G1_CONST + ROUNDING_CONST) >> 384;
+  cpp_int c2 = (k * G2_CONST + ROUNDING_CONST) >> 384;
+  cpp_int r2 = (c1 * MINUS_B1 + c2 * MINUS_B2) % n;
+  if (r2 < 0) {
+    r2 += n;
+  }
+  cpp_int r1 = (k - r2 * lambda_cpp) % n;
+  if (r1 < 0) {
+    r1 += n;
+  }
+
+  cpp_int half_n = n >> 1;
+  cpp_int r1_signed = r1;
+  if (r1_signed > half_n) {
+    r1_signed -= n;
+  }
+  cpp_int r2_signed = r2;
+  if (r2_signed > half_n) {
+    r2_signed -= n;
+  }
+
+  bool neg1 = r1_signed < 0;
+  bool neg2 = r2_signed < 0;
+  cpp_int abs1 = neg1 ? -r1_signed : r1_signed;
+  cpp_int abs2 = neg2 ? -r2_signed : r2_signed;
+
+  std::vector<int8_t> wnaf1 = ComputeWNAF(abs1, BASE_WNAF_WINDOW);
+  std::vector<int8_t> wnaf2 = ComputeWNAF(abs2, BASE_WNAF_WINDOW);
+
+  Point p1 = EvaluateWNAF(wnaf1, basePrecomp);
+  Point p2 = EvaluateWNAF(wnaf2, basePrecompLambda);
+
+  if (neg1 && !p1.isZero()) {
+    p1 = Negation(p1);
+  }
+  if (neg2 && !p2.isZero()) {
+    p2 = Negation(p2);
+  }
+
+  if (p1.isZero()) {
+    if (p2.isZero()) {
+      return p1;
+    }
+    return p2;
+  }
+  if (p2.isZero()) {
+    return p1;
+  }
+
+  Point result = Add(p1, p2);
+  result.Reduce();
+  return result;
+}
+
+Point Secp256K1::ScalarMultiplication(Point &P,Int *scalar) {
+  Int k(scalar);
+  k.Mod(&order);
+  if (k.IsZero()) {
+    Point infinity;
+    infinity.Clear();
+    return infinity;
+  }
+
+  Point base(P);
+  if (!base.z.IsOne() && !base.z.IsZero()) {
+    base.Reduce();
+  }
+
+  std::vector<Point> table = BuildFixedBaseTable(base, BASE_WNAF_WINDOW);
+  cpp_int k_cpp = IntToCpp(k);
+  std::vector<int8_t> wnaf = ComputeWNAF(k_cpp, BASE_WNAF_WINDOW);
+  return EvaluateWNAF(wnaf, table);
+}
+
+Point Secp256K1::StrausWNAF(const std::vector<Int> &scalars, const std::vector<Point> &points, int window) {
+  std::vector<Point> bases(points.begin(), points.end());
+  BatchNormalize(bases);
+
+  size_t n = scalars.size();
+  std::vector<std::vector<Point>> precomp(n);
+  std::vector<std::vector<int8_t>> wnafs(n);
+  size_t max_len = 0;
+
+  for (size_t i = 0; i < n; ++i) {
+    if (!bases[i].z.IsZero()) {
+      precomp[i] = BuildFixedBaseTable(bases[i], window);
+    }
+    Int k(scalars[i]);
+    k.Mod(&order);
+    cpp_int scalar_cpp = IntToCpp(k);
+    wnafs[i] = ComputeWNAF(scalar_cpp, window);
+    if (wnafs[i].size() > max_len) {
+      max_len = wnafs[i].size();
+    }
+  }
+
+  Point result;
+  result.Clear();
+  bool initialized = false;
+  for (int bit = static_cast<int>(max_len) - 1; bit >= 0; --bit) {
+    if (initialized) {
+      result = Double(result);
+    }
+    for (size_t i = 0; i < n; ++i) {
+      if (bit >= static_cast<int>(wnafs[i].size())) {
+        continue;
+      }
+      int digit = wnafs[i][bit];
+      if (!digit) {
+        continue;
+      }
+      int index = (std::abs(digit) - 1) >> 1;
+      if (index < 0 || index >= static_cast<int>(precomp[i].size())) {
+        continue;
+      }
+      Point addend(precomp[i][index]);
+      if (digit < 0) {
+        addend = Negation(addend);
+      }
+      if (initialized) {
+        result = Add2(result, addend);
+      } else {
+        result = addend;
+        initialized = true;
+      }
+    }
+  }
+
+  if (!initialized) {
+    result.Clear();
+  } else {
+    result.Reduce();
+  }
+  return result;
+}
+
+Point Secp256K1::PippengerMultiScalar(const std::vector<Int> &scalars, const std::vector<Point> &points, int window) {
+  size_t n = scalars.size();
+  std::vector<Point> bases(points.begin(), points.end());
+  BatchNormalize(bases);
+
+  const int window_size = 1 << window;
+  const int window_half = window_size >> 1;
+  if (window_half <= 0) {
+    return StrausWNAF(scalars, points, window);
+  }
+
+  std::vector<std::vector<Point>> multiples(n, std::vector<Point>(window_half));
+  for (size_t i = 0; i < n; ++i) {
+    if (bases[i].isZero()) {
+      continue;
+    }
+    multiples[i][0] = bases[i];
+    for (int j = 2; j <= window_half; ++j) {
+      if (j == 2) {
+        multiples[i][1] = DoubleDirect(bases[i]);
+      } else {
+        multiples[i][j - 1] = AddDirect(multiples[i][j - 2], bases[i]);
+      }
+    }
+  }
+
+  std::vector<std::vector<int32_t>> digits(n);
+  size_t max_windows = 0;
+  for (size_t i = 0; i < n; ++i) {
+    Int k(scalars[i]);
+    k.Mod(&order);
+    cpp_int value = IntToCpp(k);
+    std::vector<int32_t> repr;
+    while (value != 0) {
+      cpp_int mod = value & cpp_int(window_size - 1);
+      int32_t digit = mod.convert_to<int32_t>();
+      if (digit > window_half) {
+        digit -= window_size;
+      }
+      repr.push_back(digit);
+      value -= digit;
+      value >>= window;
+    }
+    digits[i] = std::move(repr);
+    if (digits[i].size() > max_windows) {
+      max_windows = digits[i].size();
+    }
+  }
+
+  Point result;
+  result.Clear();
+  bool initialized = false;
+
+  for (int window_index = static_cast<int>(max_windows) - 1; window_index >= 0; --window_index) {
+    if (initialized) {
+      for (int d = 0; d < window; ++d) {
+        result = Double(result);
+      }
+    }
+
+    std::vector<Point> buckets(window_half);
+    std::vector<bool> bucket_used(window_half, false);
+
+    for (size_t i = 0; i < n; ++i) {
+      if (window_index >= static_cast<int>(digits[i].size())) {
+        continue;
+      }
+      int32_t digit = digits[i][window_index];
+      if (digit == 0) {
+        continue;
+      }
+      int idx = std::abs(digit);
+      if (idx == 0 || idx > window_half || multiples[i].empty()) {
+        continue;
+      }
+      Point addend(multiples[i][idx - 1]);
+      if (digit < 0) {
+        addend = Negation(addend);
+      }
+      if (!bucket_used[idx - 1]) {
+        buckets[idx - 1] = addend;
+        bucket_used[idx - 1] = true;
+      } else {
+        buckets[idx - 1] = AddDirect(buckets[idx - 1], addend);
+      }
+    }
+
+    Point running;
+    running.Clear();
+    bool running_init = false;
+    for (int idx = window_half - 1; idx >= 0; --idx) {
+      if (!bucket_used[idx]) {
+        continue;
+      }
+      if (running_init) {
+        running = AddDirect(running, buckets[idx]);
+      } else {
+        running = buckets[idx];
+        running_init = true;
+      }
+      if (initialized) {
+        result = Add(result, running);
+      } else {
+        result = running;
+        initialized = true;
+      }
+    }
+  }
+
+  if (!initialized) {
+    result.Clear();
+  } else {
+    result.Reduce();
+  }
+  return result;
+}
+
+Point Secp256K1::MultiScalarMul(const std::vector<Int> &scalars, const std::vector<Point> &points) {
+  if (scalars.size() != points.size() || scalars.empty()) {
+    Point infinity;
+    infinity.Clear();
+    return infinity;
+  }
+
+  size_t n = scalars.size();
+  if (n < 16) {
+    return StrausWNAF(scalars, points, BASE_WNAF_WINDOW);
+  }
+
+  int window = (n >= 64) ? 6 : (n >= 32 ? 5 : 4);
+  return PippengerMultiScalar(scalars, points, window);
 }
 
 #define KEYBUFFCOMP(buff,p) \

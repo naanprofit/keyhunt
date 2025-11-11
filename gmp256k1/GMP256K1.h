@@ -24,6 +24,7 @@
 #ifndef SECP256K1H
 #define SECP256K1H
 
+#include <boost/multiprecision/cpp_int.hpp>
 #include "Point.h"
 #include <vector>
 
