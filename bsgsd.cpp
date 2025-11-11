@@ -1613,19 +1613,23 @@ void *thread_process_bsgs(void *vargp)	{
 	Int dx[CPU_GRP_SIZE / 2 + 1];
 	Point pts[CPU_GRP_SIZE];
 
-	Int dy;
-	Int dyn;
-	Int _s;
-	Int _p;
-	Int km,intaux;
-	Point pp;
-	Point pn;
+        Int dy;
+        Int dyn;
+        Int _s;
+        Int _p;
+        Int km,intaux;
+        Point pp;
+        Point pn;
+        unsigned char giant_xpoints[CPU_GRP_SIZE][BSGS_BUFFERXPOINTLENGTH];
+        uint8_t giant_first_byte[CPU_GRP_SIZE];
+        uint32_t giant_bucket_positions[CPU_GRP_SIZE];
+        uint32_t giant_bucket_offsets[257];
 	grp->Set(dx);
 	
 
 	
-	cycles = bsgs_aux / 1024;
-	if(bsgs_aux % 1024 != 0)	{
+	cycles = bsgs_aux / CPU_GRP_SIZE;
+	if(bsgs_aux % CPU_GRP_SIZE != 0)	{
 		cycles++;
 	}
 
@@ -1789,17 +1793,52 @@ pn.y.ModAdd(&GSn[i].y);
 
 				pts[0] = pn;
 				
-				for(int i = 0; i<CPU_GRP_SIZE && bsgs_found == 0; i++) {
-					
-					pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
-					
-					r = bloom_check(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
-					
-					if(r) {
-						r = bsgs_secondcheck(&base_key,((j*1024) + i),&keyfound);
+				uint32_t bucket_counts[256] = {0};
+
+				for(int i = 0; i < CPU_GRP_SIZE; i++) {
+					pts[i].x.Get32Bytes(giant_xpoints[i]);
+					uint8_t bucket = giant_xpoints[i][0];
+					giant_first_byte[i] = bucket;
+					bucket_counts[bucket]++;
+				}
+
+				giant_bucket_offsets[0] = 0;
+				for(int bucket = 0; bucket < 256; bucket++) {
+					giant_bucket_offsets[bucket + 1] = giant_bucket_offsets[bucket] + bucket_counts[bucket];
+				}
+
+				for(int bucket = 0; bucket < 256; bucket++) {
+					bucket_counts[bucket] = 0;
+				}
+
+				for(int i = 0; i < CPU_GRP_SIZE; i++) {
+					uint8_t bucket = giant_first_byte[i];
+					uint32_t pos = giant_bucket_offsets[bucket] + bucket_counts[bucket]++;
+					giant_bucket_positions[pos] = i;
+				}
+
+				for(int bucket = 0; bucket < 256 && bsgs_found == 0; bucket++) {
+					uint32_t start = giant_bucket_offsets[bucket];
+					uint32_t end = giant_bucket_offsets[bucket + 1];
+
+					if(start == end) {
+						continue;
+					}
+
+					struct bloom *primary = &bloom_bP[bucket];
+
+					for(uint32_t pos = start; pos < end && bsgs_found == 0; pos++) {
+						int i = (int)giant_bucket_positions[pos];
+
+						if(!bloom_check(primary,(char*)giant_xpoints[i],BSGS_BUFFERXPOINTLENGTH)) {
+							continue;
+						}
+
+						r = bsgs_secondcheck(&base_key,((j*CPU_GRP_SIZE) + i),&keyfound);
 						if(r)	{
 							hextemp = keyfound.GetBase16();
-							printf("[+] Thread Key found privkey %s   \n",hextemp);
+							printf("[+] Thread Key found privkey %s   
+",hextemp);
 							point_found = secp->ComputePublicKey(&keyfound);
 							aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed,point_found);
 							printf("[+] Publickey %s\n",aux_c);
@@ -1816,12 +1855,9 @@ pn.y.ModAdd(&GSn[i].y);
 							free(aux_c);
 							bsgs_found = 1;
 
-						} //End if second check
-						
-					}//End if first check
-					
-				}// For for pts variable
-				
+						}
+					}
+				}
 				// Next start point (startP += (bsSize*GRP_SIZE).G)
 				
 				pp = startP;
