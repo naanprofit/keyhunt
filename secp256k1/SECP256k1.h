@@ -37,8 +37,10 @@ public:
   Point ComputePublicKey(Int *privKey);
   Point NextKey(Point &key);
   bool  EC(Point &p);
-  
+
   Point ScalarMultiplication(Point &P,Int *scalar);
+  Point ScalarBaseMultiplication(Int *scalar);
+  Point MultiScalarMultiplication(const std::vector<Point> &points, const std::vector<Int> &scalars);
   
   char* GetPublicKeyHex(bool compressed, Point &p);
   void GetPublicKeyHex(bool compressed, Point &pubKey,char *dst);
@@ -74,7 +76,18 @@ private:
 
   uint8_t GetByte(char *str,int idx);
   Int GetY(Int x, bool isEven);
-  Point GTable[256*32];       // Generator table
+  void DecomposeScalar(Int *scalar, Int &r1, Int &r2);
+  Point ApplyEndomorphism(Point &p);
+  std::vector<Point> BuildOddMultiples(Point base, unsigned int window);
+
+  Int lambda;
+  Int minus_b1;
+  Int minus_b2;
+  Int g1Const;
+  Int g2Const;
+  Int beta;
+  unsigned int baseWindow;
+  std::vector<Point> baseOddMultiples;
 
 };
 
