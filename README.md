@@ -306,6 +306,8 @@ rmd stands for RIPE Message Digest (see https://en.wikipedia.org/wiki/RIPEMD )
 
 mode rmd160 work in the same way than address, but the diference is that file need to have hash rmd160 instead of addresses.
 
+You can tune the rmd160 batch size with `--rmd-batch-size <n>` (multiple of 4, max 1024). Smaller values can help machines with tighter cache or memory bandwidth limits, while the default 1024 remains fastest on most systems.
+
 
 example file `tests/1to32.rmd` :
 

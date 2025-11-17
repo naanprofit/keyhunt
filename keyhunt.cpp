@@ -161,6 +161,8 @@ const char *version = "0.2.230519 Satoshi Quest";
 
 #define CPU_GRP_SIZE 1024
 
+int rmd_batch_size = CPU_GRP_SIZE;
+
 std::vector<Point> Gn;
 Point _2Gn;
 
@@ -568,6 +570,7 @@ int main(int argc, char **argv)	{
                {"tmpdir", required_argument, 0, 0},
                {"bsgs-block-count", required_argument, 0, 0},
                {"bsgs-block-size", required_argument, 0, 0},
+               {"rmd-batch-size", required_argument, 0, 0},
                {0, 0, 0, 0}
        };
 
@@ -638,6 +641,21 @@ int main(int argc, char **argv)	{
                       } else if (strcmp(long_options[option_index].name, "bsgs-block-size") == 0) {
                               bsgs_ggsb.block_size = strtoull(optarg, NULL, 10);
                               bsgs_ggsb.enabled = bsgs_ggsb.block_size > 0;
+                      } else if (strcmp(long_options[option_index].name, "rmd-batch-size") == 0) {
+                              long candidate = strtol(optarg, NULL, 10);
+                              if (candidate < 4) {
+                                      candidate = 4;
+                              }
+                              if (candidate > CPU_GRP_SIZE) {
+                                      candidate = CPU_GRP_SIZE;
+                              }
+                              if (candidate % 4 != 0) {
+                                      candidate -= (candidate % 4);
+                                      if (candidate < 4) {
+                                              candidate = 4;
+                                      }
+                              }
+                              rmd_batch_size = (int)candidate;
                       }
                       continue;
               }
@@ -2938,7 +2956,7 @@ void *thread_process(void *vargp)	{
 	Int _p;
 	Point pp;
 	Point pn;
-	int i,l,pp_offset,pn_offset,hLength = (CPU_GRP_SIZE / 2 - 1);
+        int i,l,pp_offset,pn_offset,hLength;
 	uint64_t j,count;
 	Point R,temporal,publickey;
 	int r,thread_number,continue_flag = 1,k;
@@ -2951,15 +2969,23 @@ void *thread_process(void *vargp)	{
 	char publickeyhashrmd160_endomorphism[12][4][20];
 	
 	bool calculate_y = FLAGSEARCH == SEARCH_UNCOMPRESS || FLAGSEARCH == SEARCH_BOTH || FLAGCRYPTO  == CRYPTO_ETH;
-	Int key_mpz,keyfound,temp_stride;
-	tt = (struct tothread *)vargp;
-	thread_number = tt->nt;
-	free(tt);
-	grp->Set(dx);
-			
-	do {
-		if(FLAGRANDOM){
-			key_mpz.Rand(&n_range_start,&n_range_end);
+        Int key_mpz,keyfound,temp_stride;
+        tt = (struct tothread *)vargp;
+        thread_number = tt->nt;
+        free(tt);
+        grp->Set(dx);
+
+        int group_size = (FLAGMODE == MODE_RMD160) ? rmd_batch_size : CPU_GRP_SIZE;
+        if(group_size > CPU_GRP_SIZE) {
+                group_size = CPU_GRP_SIZE;
+        }
+        int half_group = group_size / 2;
+        int quarter_group = group_size / 4;
+        hLength = (half_group - 1);
+
+        do {
+                if(FLAGRANDOM){
+                        key_mpz.Rand(&n_range_start,&n_range_end);
 		}
 		else	{
 			if(n_range_start.IsLower(&n_range_end))	{
@@ -2997,7 +3023,7 @@ void *thread_process(void *vargp)	{
 				}
 			}
 			do {
-				temp_stride.SetInt32(CPU_GRP_SIZE / 2);
+                                temp_stride.SetInt32(half_group);
 				temp_stride.Mult(&stride);
 				key_mpz.Add(&temp_stride);
 	 			startP = secp->ComputePublicKey(&key_mpz);
@@ -3011,7 +3037,7 @@ void *thread_process(void *vargp)	{
 				dx[i + 1].ModSub(&_2Gn.x,&startP.x); // For the next center point
 				grp->ModInv();
 
-				pts[CPU_GRP_SIZE / 2] = startP;
+                                pts[half_group] = startP;
 
 				for(i = 0; i<hLength; i++) {
 					pp = startP;
@@ -3050,8 +3076,8 @@ void *thread_process(void *vargp)	{
 						pn.y.ModAdd(&Gn[i].y);          // ry = - p2.y - s*(ret.x-p2.x);
 					}
 
-					pp_offset = CPU_GRP_SIZE / 2 + (i + 1);
-					pn_offset = CPU_GRP_SIZE / 2 - (i + 1);
+                                        pp_offset = half_group + (i + 1);
+                                        pn_offset = half_group - (i + 1);
 
 					pts[pp_offset] = pp;
 					pts[pn_offset] = pn;
@@ -3077,18 +3103,18 @@ void *thread_process(void *vargp)	{
 						endomorphism_beta2[pn_offset].x.ModMulK1(&pn.x, &beta2);
 					}
 				}
-				/*
-					Half point for endomorphism because pts[CPU_GRP_SIZE / 2] was not calcualte in the previous cycle
-				*/
+                                /*
+                                        Half point for endomorphism because pts[half_group] was not calcualte in the previous cycle
+                                */
 				if(FLAGENDOMORPHISM)	{
 					if( calculate_y  )	{
 
-						endomorphism_beta[CPU_GRP_SIZE / 2].y.Set(&pts[CPU_GRP_SIZE / 2].y);
-						endomorphism_beta2[CPU_GRP_SIZE / 2].y.Set(&pts[CPU_GRP_SIZE / 2].y);
-					}
-					endomorphism_beta[CPU_GRP_SIZE / 2].x.ModMulK1(&pts[CPU_GRP_SIZE / 2].x, &beta);
-					endomorphism_beta2[CPU_GRP_SIZE / 2].x.ModMulK1(&pts[CPU_GRP_SIZE / 2].x, &beta2);
-				}
+                                                endomorphism_beta[half_group].y.Set(&pts[half_group].y);
+                                                endomorphism_beta2[half_group].y.Set(&pts[half_group].y);
+                                        }
+                                        endomorphism_beta[half_group].x.ModMulK1(&pts[half_group].x, &beta);
+                                        endomorphism_beta2[half_group].x.ModMulK1(&pts[half_group].x, &beta2);
+                                }
 
 				// First point (startP - (GRP_SZIE/2)*G)
 				pn = startP;
@@ -3123,7 +3149,7 @@ void *thread_process(void *vargp)	{
 					endomorphism_beta2[0].x.ModMulK1(&pn.x, &beta2);
 				}
 								
-				for(j = 0; j < CPU_GRP_SIZE/4;j++){
+                                for(j = 0; j < (uint64_t)quarter_group;j++){
 					switch(FLAGMODE)	{
 						case MODE_RMD160:
 						case MODE_ADDRESS:
@@ -6170,18 +6196,19 @@ void menu() {
         printf("-n number   Check for N sequential numbers before the random chosen, this only works with -R option\n");
         printf("            Use -n to set the N for the BSGS process. Bigger N more RAM needed (N >= 2^20)\n");
         printf("            Valid N and K pairs are listed below\n");
-	printf("-q          Quiet the thread output\n");
-	printf("-r SR:EN    StarRange:EndRange, the end range can be omitted for search from start range to N-1 ECC value\n");
-	printf("-R          Random, this is the default behavior\n");
-	printf("-s ns       Number of seconds for the stats output, 0 to omit output.\n");
-	printf("-S          S is for SAVING in files BSGS data (Bloom filters and bPtable)\n");
-	printf("-6          to skip sha256 Checksum on data files");
-	printf("-t tn       Threads number, must be a positive integer\n");
-	printf("-v value    Search for vanity Address, only with -m vanity\n");
-	printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
-	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
-	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
-	printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
+        printf("-q          Quiet the thread output\n");
+        printf("-r SR:EN    StarRange:EndRange, the end range can be omitted for search from start range to N-1 ECC value\n");
+        printf("-R          Random, this is the default behavior\n");
+        printf("-s ns       Number of seconds for the stats output, 0 to omit output.\n");
+        printf("-S          S is for SAVING in files BSGS data (Bloom filters and bPtable)\n");
+        printf("-6          to skip sha256 Checksum on data files");
+        printf("-t tn       Threads number, must be a positive integer\n");
+        printf("-v value    Search for vanity Address, only with -m vanity\n");
+        printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
+        printf("--rmd-batch-size n  Batch size for rmd160 scans (multiple of 4, max %d)\n", CPU_GRP_SIZE);
+        printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
+        printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
+        printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
 	printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
 	printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
 	printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
