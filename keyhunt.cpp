@@ -2552,12 +2552,29 @@ int main(int argc, char **argv)	{
 			MPZAUX.Set(&seconds);
 			MPZAUX.Mod(&OUTPUTSECONDS);
 			if(MPZAUX.IsZero()) {
-				total.SetInt32(0);
-				for(j = 0; j < NTHREADS; j++) {
-					pretotal.Set(&debugcount_mpz);
-					pretotal.Mult(steps[j]);					
-					total.Add(&pretotal);
-				}
+                                total.SetInt32(0);
+
+                                if(FLAGMODE == MODE_BSGS) {
+#ifdef _WIN64
+                                        WaitForSingleObject(bsgs_thread, INFINITE);
+#else
+                                        pthread_mutex_lock(&bsgs_thread);
+#endif
+                                        total.Set(&BSGS_CURRENT);
+#ifdef _WIN64
+                                        ReleaseMutex(bsgs_thread);
+#else
+                                        pthread_mutex_unlock(&bsgs_thread);
+#endif
+                                        total.Sub(&n_range_start);
+                                }
+                                else    {
+                                        for(j = 0; j < NTHREADS; j++) {
+                                                pretotal.Set(&debugcount_mpz);
+                                                pretotal.Mult(steps[j]);
+                                                total.Add(&pretotal);
+                                        }
+                                }
 				
 				if(FLAGENDOMORPHISM)	{
 					if(FLAGMODE == MODE_XPOINT)	{
