@@ -748,6 +748,8 @@ Line of execution in random mode `-R` or -B random
 
 ```./keyhunt -m bsgs -f tests/125.txt -b 125 -q -s 10 -B random```
 
+GGSB mode can be selected with `-B ggsb`. Pair it with `--bsgs-block-count` or `--bsgs-block-size` to describe how the baby table should be segmented. These options are optional and default to a single block so classic behaviour is preserved.
+
 
 Example Output:
 

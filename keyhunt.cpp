@@ -266,7 +266,7 @@ int THREADOUTPUT = 0;
 char *bit_range_str_min;
 char *bit_range_str_max;
 
-const char *bsgs_modes[5] = {"sequential","backward","both","random","dance"};
+const char *bsgs_modes[6] = {"sequential","backward","both","random","dance","ggsb"};
 const char *modes[7] = {"xpoint","address","bsgs","rmd160","pub2rmd","minikeys","vanity"};
 const char *cryptos[3] = {"btc","eth","all"};
 const char *publicsearch[3] = {"uncompress","compress","both"};
@@ -318,6 +318,18 @@ Int OUTPUTSECONDS;
 
 int FLAGSKIPCHECKSUM = 0;
 int FLAGENDOMORPHISM = 0;
+
+enum {
+        BSGS_MODE_GGSB = 5
+};
+
+struct BsgsGgsbConfig {
+        bool enabled;
+        uint64_t block_count;
+        uint64_t block_size;
+};
+
+BsgsGgsbConfig bsgs_ggsb = {false, 0, 0};
 
 int FLAGBLOOMMULTIPLIER = 1;
 int FLAGVANITY = 0;
@@ -554,6 +566,8 @@ int main(int argc, char **argv)	{
                {"bloom-bytes", required_argument, 0, 0},
                {"create-mapped", optional_argument, 0, 0},
                {"tmpdir", required_argument, 0, 0},
+               {"bsgs-block-count", required_argument, 0, 0},
+               {"bsgs-block-size", required_argument, 0, 0},
                {0, 0, 0, 0}
        };
 
@@ -618,6 +632,12 @@ int main(int argc, char **argv)	{
                               }
                       } else if (strcmp(long_options[option_index].name, "tmpdir") == 0) {
                               tmpdir_path = optarg;
+                      } else if (strcmp(long_options[option_index].name, "bsgs-block-count") == 0) {
+                              bsgs_ggsb.block_count = strtoull(optarg, NULL, 10);
+                              bsgs_ggsb.enabled = bsgs_ggsb.block_count > 0;
+                      } else if (strcmp(long_options[option_index].name, "bsgs-block-size") == 0) {
+                              bsgs_ggsb.block_size = strtoull(optarg, NULL, 10);
+                              bsgs_ggsb.enabled = bsgs_ggsb.block_size > 0;
                       }
                       continue;
               }
@@ -630,10 +650,13 @@ int main(int argc, char **argv)	{
 				fprintf(stderr,"[W] Skipping checksums on files\n");
 			break;
 			case 'B':
-				index_value = indexOf(optarg,bsgs_modes,5);
-				if(index_value >= 0 && index_value <= 4)	{
+				index_value = indexOf(optarg,bsgs_modes,6);
+				if(index_value >= 0 && index_value <= 5)	{
 					FLAGBSGSMODE = index_value;
-					//printf("[+] BSGS mode %s\n",optarg);
+				if(index_value == BSGS_MODE_GGSB){
+					bsgs_ggsb.enabled = true;
+				}
+				//printf("[+] BSGS mode %s\n",optarg);
 				}
 				else	{
 					fprintf(stderr,"[W] Ignoring unknow bsgs mode %s\n",optarg);
@@ -1262,6 +1285,26 @@ int main(int argc, char **argv)	{
 		if(BSGS_N.HasSqrt())	{	//If the root is exact
 			BSGS_M.Set(&BSGS_N);
 			BSGS_M.ModSqrt();
+			if(bsgs_ggsb.enabled){
+				uint64_t m_val = BSGS_M.GetInt64();
+				if(bsgs_ggsb.block_count == 0 && bsgs_ggsb.block_size == 0){
+					bsgs_ggsb.block_count = 1;
+				}
+				if(bsgs_ggsb.block_count > 0 && bsgs_ggsb.block_size == 0){
+					bsgs_ggsb.block_size = (m_val + bsgs_ggsb.block_count - 1) / bsgs_ggsb.block_count;
+				} else if(bsgs_ggsb.block_size > 0 && bsgs_ggsb.block_count == 0){
+					bsgs_ggsb.block_count = (m_val + bsgs_ggsb.block_size - 1) / bsgs_ggsb.block_size;
+				}
+				if(bsgs_ggsb.block_count == 0){
+					bsgs_ggsb.block_count = 1;
+				}
+				if(bsgs_ggsb.block_size == 0){
+					bsgs_ggsb.block_size = m_val;
+				}
+			} else {
+				bsgs_ggsb.block_count = 0;
+				bsgs_ggsb.block_size = 0;
+			}
 		}
 		else	{
 			fprintf(stderr,"[E] -n param doesn't have exact square root\n");
