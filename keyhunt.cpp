@@ -1466,7 +1466,21 @@ int main(int argc, char **argv)	{
 			itemsbloom3 = 1000;
 		}
 		
-		printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m);
+                if (bsgs_ggsb.enabled && bsgs_ggsb.block_count > 1) {
+                        long double bloom_error = mapped_error_override ? mapped_error_override : 0.000001L;
+                        uint64_t shard_bytes = bloom_bytes_for_entries_error(itemsbloom, bloom_error);
+                        double shard_mb = (double)shard_bytes / 1048576.0;
+                        double layer_total_mb = shard_mb * 256.0;
+                        fprintf(stderr,
+                                "[W] GGSB block partitioning is not applied during table creation yet; "
+                                "building a single classic block of %" PRIu64 " babies.\n",
+                                (uint64_t)bsgs_m);
+                        fprintf(stderr,
+                                "[W] Each bloom shard is ~%.2f MB (%zu shards -> %.2f MB per layer).\n",
+                                shard_mb, (size_t)256, layer_total_mb);
+                }
+
+                printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m);
 		bloom_bP = (struct bloom*)calloc(256,sizeof(struct bloom));
 		checkpointer((void *)bloom_bP,__FILE__,"calloc","bloom_bP" ,__LINE__ -1 );
 		bloom_bP_checksums = (struct checksumsha256*)calloc(256,sizeof(struct checksumsha256));
