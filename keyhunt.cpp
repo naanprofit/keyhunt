@@ -6154,7 +6154,7 @@ void sha256sse_23(uint8_t *src0, uint8_t *src1, uint8_t *src2, uint8_t *src3, ui
 void menu() {
 	printf("\nUsage:\n");
 	printf("-h          show this help\n");
-	printf("-B Mode     BSGS now have some modes <sequential, backward, both, random, dance>\n");
+	printf("-B Mode     BSGS modes <sequential, backward, both, random, dance, ggsb>\n");
 	printf("-b bits     For some puzzles you only need some numbers of bits in the test keys.\n");
 	printf("-c crypto   Search for specific crypto. <btc, eth> valid only w/ -m address\n");
 	printf("-C mini     Set the minikey Base only 22 character minikeys, ex: SRPqx8QiwnW4WNWnTVa2W5\n");
@@ -6178,13 +6178,15 @@ void menu() {
 	printf("-6          to skip sha256 Checksum on data files");
 	printf("-t tn       Threads number, must be a positive integer\n");
 	printf("-v value    Search for vanity Address, only with -m vanity\n");
-        printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
-       printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
-       printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
-       printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
-       printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
-       printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
-       printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
+	printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, value >= 1\n");
+	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
+	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
+	printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
+	printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
+	printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
+	printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
+	printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
+	printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
        printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
        printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
        printf("--tmpdir dir     Directory for temporary files\n");

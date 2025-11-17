@@ -2396,14 +2396,17 @@ bin_publickey to generate the binary address, which is stored in dst_address. */
 void menu() {
 	printf("\nUsage:\n");
 	printf("-h          show this help\n");
+	printf("-B Mode     BSGS modes <sequential, backward, both, random, dance, ggsb>\n");
 	printf("-k value    Use this only with bsgs mode, k value is factor for M, more speed but more RAM use wisely\n");
         printf("            K must not exceed the maximum allowed for N (see table below)\n");
 	printf("-n number   Check for N sequential numbers before the random chosen, this only works with -R option\n");
         printf("            Use -n to set the N for the BSGS process. Bigger N more RAM needed (N >= 2^20)\n");
         printf("            Valid N and K pairs are listed below\n");
 	printf("-t tn       Threads number, must be a positive integer\n");
-	printf("-p port     TCP port Number for listening conections");
-	printf("-i ip		IP Address for listening conections");
+	printf("-p port     TCP port Number for listening conections\n");
+	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
+	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
+	printf("-i ip		IP Address for listening conections\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
         printf("\nExample:\n\n");
