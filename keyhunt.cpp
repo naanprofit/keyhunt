@@ -10,6 +10,7 @@ email: albertobsd@gmail.com
 #include <math.h>
 #include <time.h>
 #include <vector>
+#include <atomic>
 #include <inttypes.h>
 #include <errno.h>
 #include <ctype.h>
@@ -309,6 +310,7 @@ struct bloom *vanity_bloom = NULL;
 struct bloom bloom;
 
 uint64_t *steps = NULL;
+std::atomic<uint64_t> bsgs_steps_total{0};
 unsigned int *ends = NULL;
 uint64_t N = 0;
 
@@ -2442,8 +2444,9 @@ int main(int argc, char **argv)	{
                 if(!FLAGREADEDFILE4) FLAGREADEDFILE4 = 1;
 		i = 0;
 
-		steps = (uint64_t *) calloc(NTHREADS,sizeof(uint64_t));
-		checkpointer((void *)steps,__FILE__,"calloc","steps" ,__LINE__ -1 );
+                bsgs_steps_total.store(0);
+                steps = (uint64_t *) calloc(NTHREADS,sizeof(uint64_t));
+                checkpointer((void *)steps,__FILE__,"calloc","steps" ,__LINE__ -1 );
 		ends = (unsigned int *) calloc(NTHREADS,sizeof(int));
 		checkpointer((void *)ends,__FILE__,"calloc","ends" ,__LINE__ -1 );
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -2580,15 +2583,12 @@ int main(int argc, char **argv)	{
 			MPZAUX.Set(&seconds);
 			MPZAUX.Mod(&OUTPUTSECONDS);
 			if(MPZAUX.IsZero()) {
-                                total.SetInt32(0);
-
-                               for(j = 0; j < NTHREADS; j++) {
-                                       pretotal.Set(&debugcount_mpz);
-                                       pretotal.Mult(steps[j]);
-                                       total.Add(&pretotal);
-                               }
+                               total.SetInt32(0);
 
                                if(FLAGMODE == MODE_BSGS) {
+                                       MPZAUX.SetInt64(bsgs_steps_total.load(std::memory_order_relaxed));
+                                       MPZAUX.Mult(&debugcount_mpz);
+                                       total.Set(&MPZAUX);
 #if defined(_WIN64) && !defined(__CYGWIN__)
                                        if (WaitForSingleObject(bsgs_thread, 0) == WAIT_OBJECT_0) {
                                                MPZAUX.Set(&BSGS_CURRENT);
@@ -2612,6 +2612,13 @@ int main(int argc, char **argv)	{
                                                pthread_mutex_unlock(&bsgs_thread);
                                        }
 #endif
+                               }
+                               else {
+                                      for(j = 0; j < NTHREADS; j++) {
+                                              pretotal.Set(&debugcount_mpz);
+                                              pretotal.Mult(steps[j]);
+                                              total.Add(&pretotal);
+                                      }
                                }
 				
 				if(FLAGENDOMORPHISM)	{
@@ -4496,8 +4503,9 @@ pn.y.ModAdd(&GSn[i].y);
 				} // end while
 			}// End if 
 		}
-		steps[thread_number]+=2;
-	}while(1);
+                steps[thread_number]+=2;
+                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
+        }while(1);
 	ends[thread_number] = 1;
 	return NULL;
 }
@@ -4751,8 +4759,9 @@ pn.y.ModAdd(&GSn[i].y);
 			}	//End if
 		} // End for with k bsgs_point_number
 
-		steps[thread_number]+=2;
-	}while(1);
+                steps[thread_number]+=2;
+                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
+        }while(1);
 	ends[thread_number] = 1;
 	return NULL;
 }
@@ -5554,8 +5563,9 @@ pn.y.ModAdd(&GSn[i].y);
 				}//while all the aMP points
 			}// End if 
 		}
-		steps[thread_number]+=2;
-	}while(1);
+                steps[thread_number]+=2;
+                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
+        }while(1);
 	ends[thread_number] = 1;
 	return NULL;
 }
@@ -5811,8 +5821,9 @@ pn.y.ModAdd(&GSn[i].y);
 				}//while all the aMP points
 			}// End if 
 		}
-		steps[thread_number]+=2;
-	}while(1);
+                steps[thread_number]+=2;
+                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
+        }while(1);
 	ends[thread_number] = 1;
 	return NULL;
 }
@@ -6096,8 +6107,9 @@ void *thread_process_bsgs_both(void *vargp)	{
 					}//while all the aMP points
 			}// End if 
 		}
-		steps[thread_number]+=2;	
-	}while(1);
+                steps[thread_number]+=2;
+                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
+        }while(1);
 	ends[thread_number] = 1;
 	return NULL;
 }
