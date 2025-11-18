@@ -504,7 +504,7 @@ int main(int argc, char **argv)	{
 	uint64_t i,BASE,PERTHREAD_R,itemsbloom,itemsbloom2,itemsbloom3;
 	uint32_t finished;
 	int readed,continue_flag,check_flag,c,salir,index_value,j;
-        Int total,pretotal,debugcount_mpz,seconds,div_pretotal,int_aux,int_r,int_q,int58,total_steps,cursor_total;
+        Int total,pretotal,debugcount_mpz,seconds,div_pretotal,int_aux,int_r,int_q,int58;
 	struct bPload *bPload_temp_ptr;
 	size_t rsize;
 	
@@ -2582,44 +2582,11 @@ int main(int argc, char **argv)	{
 			if(MPZAUX.IsZero()) {
                                 total.SetInt32(0);
 
-                                if (FLAGMODE == MODE_BSGS) {
-                                        total_steps.SetInt32(0);
-                                        cursor_total.SetInt32(0);
-
-                                        for (j = 0; j < NTHREADS; j++) {
-                                                pretotal.Set(&debugcount_mpz);
-                                                pretotal.Mult(steps[j]);
-                                                total_steps.Add(&pretotal);
-                                        }
-
-#if defined(_WIN64) && !defined(__CYGWIN__)
-                                        WaitForSingleObject(bsgs_thread, INFINITE);
-#else
-                                        pthread_mutex_lock(&bsgs_thread);
-#endif
-                                        cursor_total.Set(&BSGS_CURRENT);
-#if defined(_WIN64) && !defined(__CYGWIN__)
-                                        ReleaseMutex(bsgs_thread);
-#else
-                                        pthread_mutex_unlock(&bsgs_thread);
-#endif
-                                        cursor_total.Sub(&n_range_start);
-                                        if (cursor_total.IsLower(&ZERO)) {
-                                                cursor_total.SetInt32(0);
-                                        }
-
-                                        if (total_steps.IsGreater(&cursor_total)) {
-                                                total.Set(&total_steps);
-                                        } else {
-                                                total.Set(&cursor_total);
-                                        }
-                                } else {
-                                        for (j = 0; j < NTHREADS; j++) {
-                                                pretotal.Set(&debugcount_mpz);
-                                                pretotal.Mult(steps[j]);
-                                                total.Add(&pretotal);
-                                        }
-                                }
+                               for(j = 0; j < NTHREADS; j++) {
+                                       pretotal.Set(&debugcount_mpz);
+                                       pretotal.Mult(steps[j]);
+                                       total.Add(&pretotal);
+                               }
 				
 				if(FLAGENDOMORPHISM)	{
 					if(FLAGMODE == MODE_XPOINT)	{
