@@ -2584,17 +2584,27 @@ int main(int argc, char **argv)	{
 
                                 if (FLAGMODE == MODE_BSGS) {
 #if defined(_WIN64) && !defined(__CYGWIN__)
-                                        WaitForSingleObject(mutex_bsgs_thread, INFINITE);
+                                        WaitForSingleObject(bsgs_thread, INFINITE);
 #else
-                                        pthread_mutex_lock(&mutex_bsgs_thread);
+                                        pthread_mutex_lock(&bsgs_thread);
 #endif
                                         total.Set(&BSGS_CURRENT);
 #if defined(_WIN64) && !defined(__CYGWIN__)
-                                        ReleaseMutex(mutex_bsgs_thread);
+                                        ReleaseMutex(bsgs_thread);
 #else
-                                        pthread_mutex_unlock(&mutex_bsgs_thread);
+                                        pthread_mutex_unlock(&bsgs_thread);
 #endif
                                         total.Sub(&n_range_start);
+                                        if (total.IsLower(&ZERO)) {
+                                                total.SetInt32(0);
+                                        }
+                                        if (total.IsZero()) {
+                                                for(j = 0; j < NTHREADS; j++) {
+                                                        pretotal.Set(&debugcount_mpz);
+                                                        pretotal.Mult(steps[j]);
+                                                        total.Add(&pretotal);
+                                                }
+                                        }
                                 } else {
                                         for(j = 0; j < NTHREADS; j++) {
                                                 pretotal.Set(&debugcount_mpz);
