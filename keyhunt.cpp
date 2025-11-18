@@ -2582,10 +2582,25 @@ int main(int argc, char **argv)	{
 			if(MPZAUX.IsZero()) {
                                 total.SetInt32(0);
 
-                                for(j = 0; j < NTHREADS; j++) {
-                                        pretotal.Set(&debugcount_mpz);
-                                        pretotal.Mult(steps[j]);
-                                        total.Add(&pretotal);
+                                if (FLAGMODE == MODE_BSGS) {
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                                        WaitForSingleObject(mutex_bsgs_thread, INFINITE);
+#else
+                                        pthread_mutex_lock(&mutex_bsgs_thread);
+#endif
+                                        total.Set(&BSGS_CURRENT);
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                                        ReleaseMutex(mutex_bsgs_thread);
+#else
+                                        pthread_mutex_unlock(&mutex_bsgs_thread);
+#endif
+                                        total.Sub(&n_range_start);
+                                } else {
+                                        for(j = 0; j < NTHREADS; j++) {
+                                                pretotal.Set(&debugcount_mpz);
+                                                pretotal.Mult(steps[j]);
+                                                total.Add(&pretotal);
+                                        }
                                 }
 				
 				if(FLAGENDOMORPHISM)	{
