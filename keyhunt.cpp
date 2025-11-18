@@ -2582,36 +2582,36 @@ int main(int argc, char **argv)	{
 			if(MPZAUX.IsZero()) {
                                 total.SetInt32(0);
 
-                                if (FLAGMODE == MODE_BSGS) {
+                               if (FLAGMODE == MODE_BSGS) {
+                                       for(j = 0; j < NTHREADS; j++) {
+                                               pretotal.Set(&debugcount_mpz);
+                                               pretotal.Mult(steps[j]);
+                                               total.Add(&pretotal);
+                                       }
+                                       if (total.IsZero()) {
 #if defined(_WIN64) && !defined(__CYGWIN__)
-                                        WaitForSingleObject(bsgs_thread, INFINITE);
+                                               WaitForSingleObject(bsgs_thread, INFINITE);
 #else
-                                        pthread_mutex_lock(&bsgs_thread);
+                                               pthread_mutex_lock(&bsgs_thread);
 #endif
-                                        total.Set(&BSGS_CURRENT);
+                                               total.Set(&BSGS_CURRENT);
 #if defined(_WIN64) && !defined(__CYGWIN__)
-                                        ReleaseMutex(bsgs_thread);
+                                               ReleaseMutex(bsgs_thread);
 #else
-                                        pthread_mutex_unlock(&bsgs_thread);
+                                               pthread_mutex_unlock(&bsgs_thread);
 #endif
-                                        total.Sub(&n_range_start);
-                                        if (total.IsLower(&ZERO)) {
-                                                total.SetInt32(0);
-                                        }
-                                        if (total.IsZero()) {
-                                                for(j = 0; j < NTHREADS; j++) {
-                                                        pretotal.Set(&debugcount_mpz);
-                                                        pretotal.Mult(steps[j]);
-                                                        total.Add(&pretotal);
-                                                }
-                                        }
-                                } else {
-                                        for(j = 0; j < NTHREADS; j++) {
-                                                pretotal.Set(&debugcount_mpz);
-                                                pretotal.Mult(steps[j]);
-                                                total.Add(&pretotal);
-                                        }
-                                }
+                                               total.Sub(&n_range_start);
+                                               if (total.IsLower(&ZERO)) {
+                                                       total.SetInt32(0);
+                                               }
+                                       }
+                               } else {
+                                       for(j = 0; j < NTHREADS; j++) {
+                                               pretotal.Set(&debugcount_mpz);
+                                               pretotal.Mult(steps[j]);
+                                               total.Add(&pretotal);
+                                       }
+                               }
 				
 				if(FLAGENDOMORPHISM)	{
 					if(FLAGMODE == MODE_XPOINT)	{
