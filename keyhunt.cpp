@@ -506,7 +506,7 @@ int main(int argc, char **argv)	{
 	uint64_t i,BASE,PERTHREAD_R,itemsbloom,itemsbloom2,itemsbloom3;
 	uint32_t finished;
 	int readed,continue_flag,check_flag,c,salir,index_value,j;
-        Int total,pretotal,debugcount_mpz,seconds,div_pretotal,int_aux,int_r,int_q,int58;
+        Int total,pretotal,debugcount_mpz,seconds,div_pretotal,int_aux,int_r,int_q,int58,cursor_delta;
 	struct bPload *bPload_temp_ptr;
 	size_t rsize;
 	
@@ -2586,13 +2586,34 @@ int main(int argc, char **argv)	{
                                total.SetInt32(0);
 
                              if(FLAGMODE == MODE_BSGS) {
-                                     /* Start with the per-thread counters so the aggregate
-                                        always reflects the work each worker reports. */
-                                     total.SetInt32(0);
+                                     /* Sample the shared cursor under lock to get the most
+                                        conservative view of progress across threads. */
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                                     WaitForSingleObject(bsgs_thread, INFINITE);
+#else
+                                     pthread_mutex_lock(&bsgs_thread);
+#endif
+                                     cursor_delta.Set(&BSGS_CURRENT);
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                                     ReleaseMutex(bsgs_thread);
+#else
+                                     pthread_mutex_unlock(&bsgs_thread);
+#endif
+                                     if(cursor_delta.IsGreater(&n_range_start)) {
+                                             cursor_delta.Sub(&n_range_start);
+                                             total.Set(&cursor_delta);
+                                     } else {
+                                             total.SetInt32(0);
+                                     }
+
+                                     /* Fold in per-thread counters so we always reflect the
+                                        largest observed progress. */
                                      for(j = 0; j < NTHREADS; j++) {
                                              div_pretotal.Set(&debugcount_mpz);
                                              div_pretotal.Mult(steps[j]);
-                                             total.Add(&div_pretotal);
+                                             if(div_pretotal.IsGreater(&total)) {
+                                                     total.Set(&div_pretotal);
+                                             }
                                      }
 
                                      /* Blend in the atomic snapshot if it is ahead of the
@@ -2601,28 +2622,6 @@ int main(int argc, char **argv)	{
                                      MPZAUX.Mult(&debugcount_mpz);
                                      if(MPZAUX.IsGreater(&total)) {
                                              total.Set(&MPZAUX);
-                                     }
-
-                                     /* Finally, sample the shared cursor under lock so we pick up
-                                        any progress that has advanced BSGS_CURRENT past the
-                                        locally counted totals. A blocking lock keeps the cursor
-                                        read consistent but is held only briefly once per interval. */
-#if defined(_WIN64) && !defined(__CYGWIN__)
-                                     WaitForSingleObject(bsgs_thread, INFINITE);
-#else
-                                     pthread_mutex_lock(&bsgs_thread);
-#endif
-                                     MPZAUX.Set(&BSGS_CURRENT);
-#if defined(_WIN64) && !defined(__CYGWIN__)
-                                     ReleaseMutex(bsgs_thread);
-#else
-                                     pthread_mutex_unlock(&bsgs_thread);
-#endif
-                                     if(MPZAUX.IsGreater(&n_range_start)) {
-                                             MPZAUX.Sub(&n_range_start);
-                                             if(MPZAUX.IsGreater(&total)) {
-                                                     total.Set(&MPZAUX);
-                                             }
                                      }
                              }
                                else {
