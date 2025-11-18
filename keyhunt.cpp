@@ -4372,7 +4372,8 @@ pn.y.ModAdd(&GSn[i].y);
 				} // end while
 			}// End if 
 		}
-		steps[thread_number]+=2;
+                // Account for every 1024-key batch processed inside this iteration
+                steps[thread_number] += cycles;
 	}while(1);
 	ends[thread_number] = 1;
 	return NULL;
@@ -4627,7 +4628,8 @@ pn.y.ModAdd(&GSn[i].y);
 			}	//End if
 		} // End for with k bsgs_point_number
 
-		steps[thread_number]+=2;
+        // Each loop handles a full set of 1024-key windows, so accumulate batches
+        steps[thread_number] += cycles;
 	}while(1);
 	ends[thread_number] = 1;
 	return NULL;
@@ -5430,7 +5432,8 @@ pn.y.ModAdd(&GSn[i].y);
 				}//while all the aMP points
 			}// End if 
 		}
-		steps[thread_number]+=2;
+                // steps is tracked in 1024-key batches; one iteration covers all cycles batches
+                steps[thread_number] += cycles;
 	}while(1);
 	ends[thread_number] = 1;
 	return NULL;
@@ -5687,7 +5690,8 @@ pn.y.ModAdd(&GSn[i].y);
 				}//while all the aMP points
 			}// End if 
 		}
-		steps[thread_number]+=2;
+                // Count all processed 1024-key windows inside this iteration
+                steps[thread_number] += cycles;
 	}while(1);
 	ends[thread_number] = 1;
 	return NULL;
@@ -5972,7 +5976,8 @@ void *thread_process_bsgs_both(void *vargp)	{
 					}//while all the aMP points
 			}// End if 
 		}
-		steps[thread_number]+=2;	
+                // Tally every 1024-key batch handled by this iteration
+                steps[thread_number] += cycles;
 	}while(1);
 	ends[thread_number] = 1;
 	return NULL;
