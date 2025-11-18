@@ -2585,46 +2585,46 @@ int main(int argc, char **argv)	{
 			if(MPZAUX.IsZero()) {
                                total.SetInt32(0);
 
-                              if(FLAGMODE == MODE_BSGS) {
-                                      MPZAUX.SetInt64(bsgs_steps_total.load(std::memory_order_relaxed));
-                                      MPZAUX.Mult(&debugcount_mpz);
-                                      total.Set(&MPZAUX);
+                             if(FLAGMODE == MODE_BSGS) {
+                                     /* Start with the per-thread counters so the aggregate
+                                        always reflects the work each worker reports. */
+                                     total.SetInt32(0);
+                                     for(j = 0; j < NTHREADS; j++) {
+                                             div_pretotal.Set(&debugcount_mpz);
+                                             div_pretotal.Mult(steps[j]);
+                                             total.Add(&div_pretotal);
+                                     }
 
-                                      /* Fallback to per-thread step counters in case the
-                                         atomic snapshot lags behind the worker-local totals. */
-                                      pretotal.SetInt32(0);
-                                      for(j = 0; j < NTHREADS; j++) {
-                                              div_pretotal.Set(&debugcount_mpz);
-                                              div_pretotal.Mult(steps[j]);
-                                              pretotal.Add(&div_pretotal);
-                                      }
-                                      if(pretotal.IsGreater(&total)) {
-                                              total.Set(&pretotal);
-                                      }
+                                     /* Blend in the atomic snapshot if it is ahead of the
+                                        per-thread totals. */
+                                     MPZAUX.SetInt64(bsgs_steps_total.load(std::memory_order_relaxed));
+                                     MPZAUX.Mult(&debugcount_mpz);
+                                     if(MPZAUX.IsGreater(&total)) {
+                                             total.Set(&MPZAUX);
+                                     }
+
+                                     /* Finally, sample the shared cursor under lock so we pick up
+                                        any progress that has advanced BSGS_CURRENT past the
+                                        locally counted totals. A blocking lock keeps the cursor
+                                        read consistent but is held only briefly once per interval. */
 #if defined(_WIN64) && !defined(__CYGWIN__)
-                                       if (WaitForSingleObject(bsgs_thread, 0) == WAIT_OBJECT_0) {
-                                               MPZAUX.Set(&BSGS_CURRENT);
-                                               if(MPZAUX.IsGreater(&n_range_start)) {
-                                                       MPZAUX.Sub(&n_range_start);
-                                                       if(MPZAUX.IsGreater(&total)) {
-                                                               total.Set(&MPZAUX);
-                                                       }
-                                               }
-                                               ReleaseMutex(bsgs_thread);
-                                       }
+                                     WaitForSingleObject(bsgs_thread, INFINITE);
 #else
-                                       if(pthread_mutex_trylock(&bsgs_thread) == 0) {
-                                               MPZAUX.Set(&BSGS_CURRENT);
-                                               if(MPZAUX.IsGreater(&n_range_start)) {
-                                                       MPZAUX.Sub(&n_range_start);
-                                                       if(MPZAUX.IsGreater(&total)) {
-                                                               total.Set(&MPZAUX);
-                                                       }
-                                               }
-                                               pthread_mutex_unlock(&bsgs_thread);
-                                       }
+                                     pthread_mutex_lock(&bsgs_thread);
 #endif
-                               }
+                                     MPZAUX.Set(&BSGS_CURRENT);
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                                     ReleaseMutex(bsgs_thread);
+#else
+                                     pthread_mutex_unlock(&bsgs_thread);
+#endif
+                                     if(MPZAUX.IsGreater(&n_range_start)) {
+                                             MPZAUX.Sub(&n_range_start);
+                                             if(MPZAUX.IsGreater(&total)) {
+                                                     total.Set(&MPZAUX);
+                                             }
+                                     }
+                             }
                                else {
                                       for(j = 0; j < NTHREADS; j++) {
                                               pretotal.Set(&debugcount_mpz);
