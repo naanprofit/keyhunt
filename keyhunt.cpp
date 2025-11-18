@@ -2585,10 +2585,22 @@ int main(int argc, char **argv)	{
 			if(MPZAUX.IsZero()) {
                                total.SetInt32(0);
 
-                               if(FLAGMODE == MODE_BSGS) {
-                                       MPZAUX.SetInt64(bsgs_steps_total.load(std::memory_order_relaxed));
-                                       MPZAUX.Mult(&debugcount_mpz);
-                                       total.Set(&MPZAUX);
+                              if(FLAGMODE == MODE_BSGS) {
+                                      MPZAUX.SetInt64(bsgs_steps_total.load(std::memory_order_relaxed));
+                                      MPZAUX.Mult(&debugcount_mpz);
+                                      total.Set(&MPZAUX);
+
+                                      /* Fallback to per-thread step counters in case the
+                                         atomic snapshot lags behind the worker-local totals. */
+                                      pretotal.SetInt32(0);
+                                      for(j = 0; j < NTHREADS; j++) {
+                                              div_pretotal.Set(&debugcount_mpz);
+                                              div_pretotal.Mult(steps[j]);
+                                              pretotal.Add(&div_pretotal);
+                                      }
+                                      if(pretotal.IsGreater(&total)) {
+                                              total.Set(&pretotal);
+                                      }
 #if defined(_WIN64) && !defined(__CYGWIN__)
                                        if (WaitForSingleObject(bsgs_thread, 0) == WAIT_OBJECT_0) {
                                                MPZAUX.Set(&BSGS_CURRENT);
