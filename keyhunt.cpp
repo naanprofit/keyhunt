@@ -2587,6 +2587,32 @@ int main(int argc, char **argv)	{
                                        pretotal.Mult(steps[j]);
                                        total.Add(&pretotal);
                                }
+
+                               if(FLAGMODE == MODE_BSGS) {
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                                       if (WaitForSingleObject(bsgs_thread, 0) == WAIT_OBJECT_0) {
+                                               MPZAUX.Set(&BSGS_CURRENT);
+                                               if(MPZAUX.IsGreater(&n_range_start)) {
+                                                       MPZAUX.Sub(&n_range_start);
+                                                       if(MPZAUX.IsGreater(&total)) {
+                                                               total.Set(&MPZAUX);
+                                                       }
+                                               }
+                                               ReleaseMutex(bsgs_thread);
+                                       }
+#else
+                                       if(pthread_mutex_trylock(&bsgs_thread) == 0) {
+                                               MPZAUX.Set(&BSGS_CURRENT);
+                                               if(MPZAUX.IsGreater(&n_range_start)) {
+                                                       MPZAUX.Sub(&n_range_start);
+                                                       if(MPZAUX.IsGreater(&total)) {
+                                                               total.Set(&MPZAUX);
+                                                       }
+                                               }
+                                               pthread_mutex_unlock(&bsgs_thread);
+                                       }
+#endif
+                               }
 				
 				if(FLAGENDOMORPHISM)	{
 					if(FLAGMODE == MODE_XPOINT)	{
