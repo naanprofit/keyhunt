@@ -764,6 +764,14 @@ Run the BSGS daemon with the same layout:
 ./bsgsd -k 4096 -t 8 -6 -B ggsb --bsgs-block-count 4
 ```
 
+**Quick sanity check without huge files**: use a tiny range and small `-k` to confirm the pipeline before scaling up, e.g.
+
+```bash
+./keyhunt -m bsgs -f tests/1to63_65.txt -k 8 -r 0:1000000 -q -S --tmpdir ./bloomfiles
+```
+
+This builds only a few MB of blooms and a small bPtable so you can validate your flags. Large ranges (e.g., `-n 0x40000000000000` with large `-k`) will legitimately create tens of GB per bloom layer because table creation still uses a single classic block even if `--bsgs-block-count` is provided.
+
 
 Example Output:
 

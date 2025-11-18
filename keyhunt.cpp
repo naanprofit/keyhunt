@@ -1466,11 +1466,25 @@ int main(int argc, char **argv)	{
 			itemsbloom3 = 1000;
 		}
 		
+                long double bloom_error = mapped_error_override ? mapped_error_override : 0.000001L;
+                uint64_t shard_bytes = bloom_bytes_for_entries_error(itemsbloom, bloom_error);
+                double shard_mb = (double)shard_bytes / 1048576.0;
+                double layer_total_mb = shard_mb * 256.0;
+
+                uint64_t requested_blocks = (bsgs_ggsb.enabled && bsgs_ggsb.block_count) ? bsgs_ggsb.block_count : 1;
+                uint64_t effective_blocks = 1; // table creation still builds a single classic block
+                uint64_t block_babies = (uint64_t)bsgs_m;
+                double ptable_mb = (double)(block_babies * sizeof(struct bsgs_xvalue)) / 1048576.0;
+
+                fprintf(stderr,
+                        "[i] BSGS table build: classic layout, creating %" PRIu64 " block(s) "
+                        "(%" PRIu64 " requested) of %" PRIu64 " babies each.\n",
+                        effective_blocks, requested_blocks, block_babies);
+                fprintf(stderr,
+                        "[i] Expected sizes: each bloom layer ~%.2f MB (256 shards), bPtable ~%.2f MB.\n",
+                        layer_total_mb, ptable_mb);
+
                 if (bsgs_ggsb.enabled && bsgs_ggsb.block_count > 1) {
-                        long double bloom_error = mapped_error_override ? mapped_error_override : 0.000001L;
-                        uint64_t shard_bytes = bloom_bytes_for_entries_error(itemsbloom, bloom_error);
-                        double shard_mb = (double)shard_bytes / 1048576.0;
-                        double layer_total_mb = shard_mb * 256.0;
                         fprintf(stderr,
                                 "[W] GGSB block partitioning is not applied during table creation yet; "
                                 "building a single classic block of %" PRIu64 " babies.\n",
