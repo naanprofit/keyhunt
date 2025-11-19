@@ -134,7 +134,19 @@ int THREADOUTPUT = 0;
 char *bit_range_str_min;
 char *bit_range_str_max;
 
-const char *bsgs_modes[5] = {"secuential","backward","both","random","dance"};
+const char *bsgs_modes[6] = {"secuential","backward","both","random","dance","ggsb"};
+
+enum {
+        BSGS_MODE_GGSB = 5
+};
+
+struct BsgsGgsbConfig {
+        bool enabled;
+        uint64_t block_count;
+        uint64_t block_size;
+};
+
+BsgsGgsbConfig bsgs_ggsb = {false, 0, 0};
 
 pthread_t *tid = NULL;
 pthread_mutex_t write_keys;
@@ -342,13 +354,25 @@ int main(int argc, char **argv)	{
 		rseed(clock() + time(NULL) + rand()*rand());
 	}
 	
-	port = PORT;
-	IP = (char*)ip_default;
-	
-	
-	printf("[+] Version %s, developed by AlbertoBSD\n",version);
+        port = PORT;
+        IP = (char*)ip_default;
 
-	while ((c = getopt(argc, argv, "6hk:n:t:p:i:")) != -1) {
+        for(int i = 1; i < argc; i++){
+                if(strcmp(argv[i],"--bsgs-block-count") == 0 && (i + 1) < argc){
+                        bsgs_ggsb.block_count = strtoull(argv[i+1], NULL, 10);
+                        bsgs_ggsb.enabled = bsgs_ggsb.block_count > 0;
+                        i++;
+                } else if(strcmp(argv[i],"--bsgs-block-size") == 0 && (i + 1) < argc){
+                        bsgs_ggsb.block_size = strtoull(argv[i+1], NULL, 10);
+                        bsgs_ggsb.enabled = bsgs_ggsb.block_size > 0;
+                        i++;
+                }
+        }
+
+
+        printf("[+] Version %s, developed by AlbertoBSD\n",version);
+
+        while ((c = getopt(argc, argv, "6hk:n:t:p:i:B:")) != -1) {
 		switch(c) {
 			case '6':
 				FLAGSKIPCHECKSUM = 1;
@@ -365,6 +389,15 @@ int main(int argc, char **argv)	{
 					KFACTOR = 1;
 				}
 				printf("[+] K factor %i\n",KFACTOR);
+			break;
+			case 'B':
+				index_value = indexOf(optarg,bsgs_modes,6);
+				if(index_value >= 0 && index_value <= 5){
+					FLAGBSGSMODE = index_value;
+					if(index_value == BSGS_MODE_GGSB){
+						bsgs_ggsb.enabled = true;
+					}
+				}
 			break;
 			case 'n':
 				// Set FLAG_N and str_N
@@ -448,6 +481,26 @@ int main(int argc, char **argv)	{
 		if(BSGS_N.HasSqrt())	{	//If the root is exact
 			BSGS_M.Set(&BSGS_N);
 			BSGS_M.ModSqrt();
+			if(bsgs_ggsb.enabled){
+				uint64_t m_val = BSGS_M.GetInt64();
+				if(bsgs_ggsb.block_count == 0 && bsgs_ggsb.block_size == 0){
+					bsgs_ggsb.block_count = 1;
+				}
+				if(bsgs_ggsb.block_count > 0 && bsgs_ggsb.block_size == 0){
+					bsgs_ggsb.block_size = (m_val + bsgs_ggsb.block_count - 1) / bsgs_ggsb.block_count;
+				} else if(bsgs_ggsb.block_size > 0 && bsgs_ggsb.block_count == 0){
+					bsgs_ggsb.block_count = (m_val + bsgs_ggsb.block_size - 1) / bsgs_ggsb.block_size;
+				}
+				if(bsgs_ggsb.block_count == 0){
+					bsgs_ggsb.block_count = 1;
+				}
+				if(bsgs_ggsb.block_size == 0){
+					bsgs_ggsb.block_size = m_val;
+				}
+			} else {
+				bsgs_ggsb.block_count = 0;
+				bsgs_ggsb.block_size = 0;
+			}
 		}
 		else	{
 			fprintf(stderr,"[E] -n param doesn't have exact square root\n");
@@ -2343,14 +2396,17 @@ bin_publickey to generate the binary address, which is stored in dst_address. */
 void menu() {
 	printf("\nUsage:\n");
 	printf("-h          show this help\n");
+	printf("-B Mode     BSGS modes <sequential, backward, both, random, dance, ggsb>\n");
 	printf("-k value    Use this only with bsgs mode, k value is factor for M, more speed but more RAM use wisely\n");
         printf("            K must not exceed the maximum allowed for N (see table below)\n");
 	printf("-n number   Check for N sequential numbers before the random chosen, this only works with -R option\n");
         printf("            Use -n to set the N for the BSGS process. Bigger N more RAM needed (N >= 2^20)\n");
         printf("            Valid N and K pairs are listed below\n");
 	printf("-t tn       Threads number, must be a positive integer\n");
-	printf("-p port     TCP port Number for listening conections");
-	printf("-i ip		IP Address for listening conections");
+	printf("-p port     TCP port Number for listening conections\n");
+	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
+	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
+	printf("-i ip		IP Address for listening conections\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
         printf("\nExample:\n\n");
