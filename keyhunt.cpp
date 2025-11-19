@@ -11,6 +11,7 @@ email: albertobsd@gmail.com
 #include <time.h>
 #include <vector>
 #include <atomic>
+#include <new>
 #include <inttypes.h>
 #include <errno.h>
 #include <ctype.h>
@@ -309,7 +310,7 @@ struct bloom *vanity_bloom = NULL;
 
 struct bloom bloom;
 
-uint64_t *steps = NULL;
+std::atomic<uint64_t> *steps = NULL;
 std::atomic<uint64_t> bsgs_steps_total{0};
 unsigned int *ends = NULL;
 uint64_t N = 0;
@@ -2444,12 +2445,15 @@ int main(int argc, char **argv)	{
                 if(!FLAGREADEDFILE4) FLAGREADEDFILE4 = 1;
 		i = 0;
 
-               bsgs_steps_total.store(0);
-               steps = (uint64_t *)calloc(NTHREADS,sizeof(uint64_t));
-               if(steps == NULL){
-                       fprintf(stderr,"[E] calloc steps\n");
-                       exit(EXIT_FAILURE);
-               }
+		bsgs_steps_total.store(0);
+		steps = new(std::nothrow) std::atomic<uint64_t>[NTHREADS];
+		if(steps == NULL){
+			fprintf(stderr,"[E] calloc steps\n");
+			exit(EXIT_FAILURE);
+		}
+		for(j = 0; j < NTHREADS; j++) {
+			steps[j].store(0, std::memory_order_relaxed);
+		}
                ends = (unsigned int *) calloc(NTHREADS,sizeof(int));
                checkpointer((void *)ends,__FILE__,"calloc","ends" ,__LINE__ -1 );
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -2512,11 +2516,14 @@ int main(int argc, char **argv)	{
 		free(aux);
 	}
 	if(FLAGMODE != MODE_BSGS)	{
-                steps = (uint64_t *)calloc(NTHREADS,sizeof(uint64_t));
-                if(steps == NULL){
-                        fprintf(stderr,"[E] calloc steps\n");
-                        exit(EXIT_FAILURE);
-                }
+		steps = new(std::nothrow) std::atomic<uint64_t>[NTHREADS];
+		if(steps == NULL){
+			fprintf(stderr,"[E] calloc steps\n");
+			exit(EXIT_FAILURE);
+		}
+		for(j = 0; j < NTHREADS; j++) {
+			steps[j].store(0, std::memory_order_relaxed);
+		}
 		ends = (unsigned int *) calloc(NTHREADS,sizeof(int));
 		checkpointer((void *)ends,__FILE__,"calloc","ends" ,__LINE__ -1 );
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -2591,11 +2598,11 @@ int main(int argc, char **argv)	{
                                 total.SetInt32(0);
 
                                 // Sum per-thread steps in units of debugcount_mpz
-                                for (j = 0; j < NTHREADS; j++) {
-                                        pretotal.Set(&debugcount_mpz);
-                                        pretotal.Mult(steps[j]);
-                                        total.Add(&pretotal);
-                                }
+			for (j = 0; j < NTHREADS; j++) {
+				pretotal.Set(&debugcount_mpz);
+				pretotal.Mult(steps[j].load(std::memory_order_relaxed));
+				total.Add(&pretotal);
+			}
 
                                 // Apply endomorphism / compressed search factors
                                 if (FLAGENDOMORPHISM) {
@@ -2970,7 +2977,7 @@ void *thread_process_minikeys(void *vargp)	{
 						}
 					}
 				}
-                               steps[thread_number]++;
+steps[thread_number].fetch_add(1, std::memory_order_relaxed);
 				count+=1024;
 			}while(count < N_SEQUENTIAL_MAX && continue_flag);
 		}
@@ -3555,7 +3562,7 @@ void *thread_process(void *vargp)	{
 				}
 				*/
 
-                               steps[thread_number]++;
+steps[thread_number].fetch_add(1, std::memory_order_relaxed);
 
 				// Next start point (startP + GRP_SIZE*G)
 				pp = startP;
@@ -3992,7 +3999,7 @@ void *thread_process_vanity(void *vargp)	{
 					temp_stride.Mult(&stride);
 					key_mpz.Add(&temp_stride);
 				}
-                               steps[thread_number]++;
+steps[thread_number].fetch_add(1, std::memory_order_relaxed);
 
 				// Next start point (startP + GRP_SIZE*G)
 				pp = startP;
@@ -4484,7 +4491,7 @@ pn.y.ModAdd(&GSn[i].y);
 				} // end while
 			}// End if 
 		}
-               steps[thread_number] += 2;
+steps[thread_number].fetch_add(2, std::memory_order_relaxed);
                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
         }while(1);
 	ends[thread_number] = 1;
@@ -4740,7 +4747,7 @@ pn.y.ModAdd(&GSn[i].y);
 			}	//End if
 		} // End for with k bsgs_point_number
 
-               steps[thread_number] += 2;
+steps[thread_number].fetch_add(2, std::memory_order_relaxed);
                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
         }while(1);
 	ends[thread_number] = 1;
@@ -5544,7 +5551,7 @@ pn.y.ModAdd(&GSn[i].y);
 				}//while all the aMP points
 			}// End if 
 		}
-               steps[thread_number] += 2;
+steps[thread_number].fetch_add(2, std::memory_order_relaxed);
                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
         }while(1);
 	ends[thread_number] = 1;
@@ -5802,7 +5809,7 @@ pn.y.ModAdd(&GSn[i].y);
 				}//while all the aMP points
 			}// End if 
 		}
-               steps[thread_number] += 2;
+steps[thread_number].fetch_add(2, std::memory_order_relaxed);
                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
         }while(1);
 	ends[thread_number] = 1;
@@ -6088,7 +6095,7 @@ void *thread_process_bsgs_both(void *vargp)	{
 					}//while all the aMP points
 			}// End if 
 		}
-               steps[thread_number] += 2;
+steps[thread_number].fetch_add(2, std::memory_order_relaxed);
                bsgs_steps_total.fetch_add(2, std::memory_order_relaxed);
         }while(1);
 	ends[thread_number] = 1;
