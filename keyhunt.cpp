@@ -2670,7 +2670,8 @@ int main(int argc, char **argv)	{
                                         free(str_divpretotal);
                                 }
 
-                                print_status(buffer);
+                                printf("%s", buffer);
+                                fflush(stdout);
                                 THREADOUTPUT = 0;
 #ifdef _WIN64
                                 ReleaseMutex(bsgs_thread);
