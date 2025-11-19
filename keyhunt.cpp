@@ -267,6 +267,12 @@ void KECCAK_256(uint8_t *source, size_t size,uint8_t *dst);
 void generate_binaddress_eth(Point &publickey,unsigned char *dst_address);
 
 int THREADOUTPUT = 0;
+
+static inline void print_status(const char *msg) {
+        printf("%s", msg);
+        fflush(stdout);
+        THREADOUTPUT = 0;
+}
 char *bit_range_str_min;
 char *bit_range_str_max;
 
@@ -2590,21 +2596,17 @@ int main(int argc, char **argv)	{
 		if(check_flag)	{
 			continue_flag = 0;
 		}
-		if (OUTPUTSECONDS.IsGreater(&ZERO)) {
+                if (OUTPUTSECONDS.IsGreater(&ZERO)) {
                         MPZAUX.Set(&seconds);
                         MPZAUX.Mod(&OUTPUTSECONDS);
                         if (MPZAUX.IsZero()) {
-                                // Unified progress accounting for all modes (including BSGS/GGSB)
                                 total.SetInt32(0);
+                                for (j = 0; j < NTHREADS; j++) {
+                                        pretotal.Set(&debugcount_mpz);
+                                        pretotal.Mult(steps[j].load(std::memory_order_relaxed));
+                                        total.Add(&pretotal);
+                                }
 
-                                // Sum per-thread steps in units of debugcount_mpz
-			for (j = 0; j < NTHREADS; j++) {
-				pretotal.Set(&debugcount_mpz);
-				pretotal.Mult(steps[j].load(std::memory_order_relaxed));
-				total.Add(&pretotal);
-			}
-
-                                // Apply endomorphism / compressed search factors
                                 if (FLAGENDOMORPHISM) {
                                         if (FLAGMODE == MODE_XPOINT) {
                                                 total.Mult(3);
@@ -2622,7 +2624,6 @@ int main(int argc, char **argv)	{
 #endif
                                 pretotal.Set(&total);
                                 pretotal.Div(&seconds);
-
                                 str_seconds  = seconds.GetBase10();
                                 str_pretotal = pretotal.GetBase10();
                                 str_total    = total.GetBase10();
@@ -2632,13 +2633,9 @@ int main(int argc, char **argv)	{
                                                 sprintf(buffer,
                                                         "[+] Total %s keys in %s seconds: %s keys/s\n",
                                                         str_total, str_seconds, str_pretotal);
-                                        } else if (THREADOUTPUT == 1) {
-                                                sprintf(buffer,
-                                                        "\r[+] Total %s keys in %s seconds: %s keys/s\r",
-                                                        str_total, str_seconds, str_pretotal);
                                         } else {
                                                 sprintf(buffer,
-                                                        "[+] Total %s keys in %s seconds: %s keys/s\n",
+                                                        "\r[+] Total %s keys in %s seconds: %s keys/s\r",
                                                         str_total, str_seconds, str_pretotal);
                                         }
                                 } else {
@@ -2672,19 +2669,11 @@ int main(int argc, char **argv)	{
                                                         str_total, str_seconds,
                                                         str_divpretotal, str_limits_prefixs[i],
                                                         str_pretotal);
-                                        } else {
-                                                sprintf(buffer,
-                                                        "[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\n",
-                                                        str_total, str_seconds,
-                                                        str_divpretotal, str_limits_prefixs[i],
-                                                        str_pretotal);
                                         }
                                         free(str_divpretotal);
                                 }
 
-                                printf("%s", buffer);
-                                fflush(stdout);
-                                THREADOUTPUT = 0;
+                                print_status(buffer);
 #ifdef _WIN64
                                 ReleaseMutex(bsgs_thread);
 #else
