@@ -2632,9 +2632,13 @@ int main(int argc, char **argv)	{
                                                 sprintf(buffer,
                                                         "[+] Total %s keys in %s seconds: %s keys/s\n",
                                                         str_total, str_seconds, str_pretotal);
-                                        } else {
+                                        } else if (THREADOUTPUT == 1) {
                                                 sprintf(buffer,
                                                         "\r[+] Total %s keys in %s seconds: %s keys/s\r",
+                                                        str_total, str_seconds, str_pretotal);
+                                        } else {
+                                                sprintf(buffer,
+                                                        "[+] Total %s keys in %s seconds: %s keys/s\n",
                                                         str_total, str_seconds, str_pretotal);
                                         }
                                 } else {
@@ -2665,6 +2669,12 @@ int main(int argc, char **argv)	{
                                         } else if (THREADOUTPUT == 1) {
                                                 sprintf(buffer,
                                                         "\r[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\r",
+                                                        str_total, str_seconds,
+                                                        str_divpretotal, str_limits_prefixs[i],
+                                                        str_pretotal);
+                                        } else {
+                                                sprintf(buffer,
+                                                        "[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\n",
                                                         str_total, str_seconds,
                                                         str_divpretotal, str_limits_prefixs[i],
                                                         str_pretotal);
