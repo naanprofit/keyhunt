@@ -37,7 +37,9 @@ email: albertobsd@gmail.com
 #else
 #include <unistd.h>
 #include <pthread.h>
+#if !defined(__APPLE__)
 #include <sys/random.h>
+#endif
 #include <getopt.h>
 #if !defined(__APPLE__)
 #include <sys/sysinfo.h>
@@ -52,6 +54,23 @@ email: albertobsd@gmail.com
 #include <sys/sysctl.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
+static int portable_posix_fallocate(int fd, off_t offset, off_t len) {
+        if(len < 0){
+                return EINVAL;
+        }
+        off_t target = offset + len;
+        struct stat st;
+        if(fstat(fd,&st) != 0){
+                return errno;
+        }
+        if(st.st_size < target){
+                if(ftruncate(fd, target) != 0){
+                        return errno;
+                }
+        }
+        return 0;
+}
+#define posix_fallocate portable_posix_fallocate
 #endif
 
 #ifdef __unix__
@@ -102,9 +121,9 @@ static inline void tune_file_stream(FILE *stream, size_t bufsize, bool sequentia
                 }
 #endif
         }
-#else
         (void)sequential_hint;
 #endif
+        (void)sequential_hint;
 }
 
 struct checksumsha256	{
@@ -547,28 +566,33 @@ int main(int argc, char **argv)	{
 	BSGS_GROUP_SIZE.SetInt32(CPU_GRP_SIZE);
 	
 #if defined(_WIN64) && !defined(__CYGWIN__)
-	//Any windows secure random source goes here
-	rseed(clock() + time(NULL) + rand());
+        //Any windows secure random source goes here
+        rseed(clock() + time(NULL) + rand());
+#elif defined(__APPLE__)
+        unsigned long rseedvalue = 0;
+        arc4random_buf(&rseedvalue, sizeof(rseedvalue));
+        rseed(rseedvalue);
 #else
-	unsigned long rseedvalue;
-	int bytes_read = getrandom(&rseedvalue, sizeof(unsigned long), GRND_NONBLOCK);
-	if(bytes_read > 0)	{
-		rseed(rseedvalue);
-		/*
-		In any case that seed is for a failsafe RNG, the default source on linux is getrandom function
-		See https://www.2uo.de/myths-about-urandom/
-		*/
-	}
-	else	{
-		/*
-			what year is??
-			WTF linux without RNG ? 
-		*/
-		fprintf(stderr,"[E] Error getrandom() ?\n");
-		exit(EXIT_FAILURE);
-		rseed(clock() + time(NULL) + rand()*rand());
-	}
+        unsigned long rseedvalue;
+        int bytes_read = getrandom(&rseedvalue, sizeof(unsigned long), GRND_NONBLOCK);
+        if(bytes_read > 0)      {
+                rseed(rseedvalue);
+                /*
+                In any case that seed is for a failsafe RNG, the default source on linux is getrandom function
+                See https://www.2uo.de/myths-about-urandom/
+                */
+        }
+        else    {
+                /*
+                        what year is??
+                        WTF linux without RNG ?
+                */
+                fprintf(stderr,"[E] Error getrandom() ?\n");
+                exit(EXIT_FAILURE);
+                rseed(clock() + time(NULL) + rand()*rand());
+        }
 #endif
+
 	
 	
 	
@@ -2061,7 +2085,7 @@ int main(int argc, char **argv)	{
 					THREADCYCLES++;
 				}
 				
-				printf("\r[+] processing %lu/%lu bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
+                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
 				fflush(stdout);
 				
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -2117,7 +2141,7 @@ int main(int argc, char **argv)	{
 					}
 
 					if(OLDFINISHED_ITEMS != FINISHED_ITEMS)	{
-						printf("\r[+] processing %lu/%lu bP points : %i%%\r",FINISHED_ITEMS,bsgs_m2,(int) (((double)FINISHED_ITEMS/(double)bsgs_m2)*100));
+                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m2,(int) (((double)FINISHED_ITEMS/(double)bsgs_m2)*100));
 						fflush(stdout);
 						OLDFINISHED_ITEMS = FINISHED_ITEMS;
 					}
@@ -2141,7 +2165,7 @@ int main(int argc, char **argv)	{
 						}
 					}
 				}while(FINISHED_THREADS_COUNTER < THREADCYCLES);
-				printf("\r[+] processing %lu/%lu bP points : 100%%     \n",bsgs_m2,bsgs_m2);
+                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : 100%%     \n",bsgs_m2,bsgs_m2);
 				
 				free(tid);
 				free(bPload_mutex);
@@ -2172,7 +2196,7 @@ int main(int argc, char **argv)	{
 					//if(FLAGDEBUG) printf("[D] PERTHREAD_R: %lu\n",PERTHREAD_R);
 				}
 				
-				printf("\r[+] processing %lu/%lu bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
+                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
 				fflush(stdout);
 				
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -2231,7 +2255,7 @@ int main(int argc, char **argv)	{
 						}
 					}
 					if(OLDFINISHED_ITEMS != FINISHED_ITEMS)	{
-						printf("\r[+] processing %lu/%lu bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
+                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
 						fflush(stdout);
 						OLDFINISHED_ITEMS = FINISHED_ITEMS;
 					}
@@ -2256,7 +2280,7 @@ int main(int argc, char **argv)	{
 					}
 					
 				}while(FINISHED_THREADS_COUNTER < THREADCYCLES);
-				printf("\r[+] processing %lu/%lu bP points : 100%%     \n",bsgs_m,bsgs_m);
+                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : 100%%     \n",bsgs_m,bsgs_m);
 				
 				free(tid);
 				free(bPload_mutex);
@@ -2295,7 +2319,7 @@ int main(int argc, char **argv)	{
 			fflush(stdout);
 		}	
 		if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)   {
-			printf("[+] Sorting %lu elements... ",bsgs_m3);
+                printf("[+] Sorting %" PRIu64 " elements... ",bsgs_m3);
 			fflush(stdout);
 			bsgs_sort(bPtable,bsgs_m3);
 			sha256((uint8_t*)bPtable, bytes,(uint8_t*) checksum);
@@ -7338,7 +7362,7 @@ void writeFileIfNeeded(const char *fileName)	{
                 fileDescriptor = fopen(fileBloomName,"wb");
                 tune_file_stream(fileDescriptor, kIOBufferSize, true);
 		dataSize = N * (sizeof(struct address_value));
-		printf("[D] size data %li\n",dataSize);
+                printf("[D] size data %" PRIu64 "\n",dataSize);
 		if(fileDescriptor != NULL)	{
 			printf("[+] Writing file %s ",fileBloomName);
 			
