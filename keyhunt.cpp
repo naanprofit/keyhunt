@@ -2588,136 +2588,101 @@ int main(int argc, char **argv)	{
 		if(check_flag)	{
 			continue_flag = 0;
 		}
-		if(OUTPUTSECONDS.IsGreater(&ZERO) ){
-			MPZAUX.Set(&seconds);
-			MPZAUX.Mod(&OUTPUTSECONDS);
-			if(MPZAUX.IsZero()) {
-                               total.SetInt32(0);
+		if (OUTPUTSECONDS.IsGreater(&ZERO)) {
+                        MPZAUX.Set(&seconds);
+                        MPZAUX.Mod(&OUTPUTSECONDS);
+                        if (MPZAUX.IsZero()) {
+                                // Unified progress accounting for all modes (including BSGS/GGSB)
+                                total.SetInt32(0);
 
-                             if(FLAGMODE == MODE_BSGS) {
-                                     /* Sample the shared cursor under lock to get the most
-                                        conservative view of progress across threads. */
-#if defined(_WIN64) && !defined(__CYGWIN__)
-                                     WaitForSingleObject(bsgs_thread, INFINITE);
-#else
-                                     pthread_mutex_lock(&bsgs_thread);
-#endif
-                                     cursor_delta.Set(&BSGS_CURRENT);
-#if defined(_WIN64) && !defined(__CYGWIN__)
-                                     ReleaseMutex(bsgs_thread);
-#else
-                                     pthread_mutex_unlock(&bsgs_thread);
-#endif
-                                     if(cursor_delta.IsGreater(&n_range_start)) {
-                                             cursor_delta.Sub(&n_range_start);
-                                             total.Set(&cursor_delta);
-                                     } else {
-                                             total.SetInt32(0);
-                                     }
+                                // Sum per-thread steps in units of debugcount_mpz
+                                for (j = 0; j < NTHREADS; j++) {
+                                        pretotal.Set(&debugcount_mpz);
+                                        pretotal.Mult(steps[j].load(std::memory_order_relaxed));
+                                        total.Add(&pretotal);
+                                }
 
-                                     /* Fold in per-thread counters so we always reflect the
-                                        largest observed progress. */
-                                     for(j = 0; j < NTHREADS; j++) {
-                                             div_pretotal.Set(&debugcount_mpz);
-                                             div_pretotal.Mult(steps[j].load(std::memory_order_relaxed));
-                                             if(div_pretotal.IsGreater(&total)) {
-                                                     total.Set(&div_pretotal);
-                                             }
-                                     }
+                                // Apply endomorphism / compressed search factors
+                                if (FLAGENDOMORPHISM) {
+                                        if (FLAGMODE == MODE_XPOINT) {
+                                                total.Mult(3);
+                                        } else {
+                                                total.Mult(6);
+                                        }
+                                } else if (FLAGSEARCH == SEARCH_COMPRESS) {
+                                        total.Mult(2);
+                                }
 
-                                     /* Blend in the atomic snapshot if it is ahead of the
-                                        per-thread totals. */
-                                     MPZAUX.SetInt64(bsgs_steps_total.load(std::memory_order_relaxed));
-                                     MPZAUX.Mult(&debugcount_mpz);
-                                     if(MPZAUX.IsGreater(&total)) {
-                                             total.Set(&MPZAUX);
-                                     }
-                             }
-                               else {
-                                      for(j = 0; j < NTHREADS; j++) {
-                                              pretotal.Set(&debugcount_mpz);
-                                              pretotal.Mult(steps[j].load(std::memory_order_relaxed));
-                                              total.Add(&pretotal);
-                                      }
-                               }
-				
-				if(FLAGENDOMORPHISM)	{
-					if(FLAGMODE == MODE_XPOINT)	{
-						total.Mult(3);
-					}
-					else	{
-						total.Mult(6);
-					}
-				}
-				else	{
-					if(FLAGSEARCH == SEARCH_COMPRESS)	{
-						total.Mult(2);
-					}
-				}
-				
 #ifdef _WIN64
-				WaitForSingleObject(bsgs_thread, INFINITE);
+                                WaitForSingleObject(bsgs_thread, INFINITE);
 #else
-				pthread_mutex_lock(&bsgs_thread);
-#endif			
-				pretotal.Set(&total);
-				pretotal.Div(&seconds);
-				str_seconds = seconds.GetBase10();
-				str_pretotal = pretotal.GetBase10();
-				str_total = total.GetBase10();
-				
-				
-				if(pretotal.IsLower(&int_limits[0]))	{
-					if(FLAGMATRIX)	{
-						sprintf(buffer,"[+] Total %s keys in %s seconds: %s keys/s\n",str_total,str_seconds,str_pretotal);
-					}
-					else	{
-						sprintf(buffer,"\r[+] Total %s keys in %s seconds: %s keys/s\r",str_total,str_seconds,str_pretotal);
-					}
-				}
-				else	{
-					i = 0;
-					salir = 0;
-					while( i < 6 && !salir)	{
-						if(pretotal.IsLower(&int_limits[i+1]))	{
-							salir = 1;
-						}
-						else	{
-							i++;
-						}
-					}
+                                pthread_mutex_lock(&bsgs_thread);
+#endif
+                                pretotal.Set(&total);
+                                pretotal.Div(&seconds);
 
-					div_pretotal.Set(&pretotal);
-					div_pretotal.Div(&int_limits[salir ? i : i-1]);
-					str_divpretotal = div_pretotal.GetBase10();
-					if(FLAGMATRIX)	{
-						sprintf(buffer,"[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\n",str_total,str_seconds,str_divpretotal,str_limits_prefixs[salir ? i : i-1],str_pretotal);
-					}
-					else	{
-						if(THREADOUTPUT == 1)	{
-							sprintf(buffer,"\r[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\r",str_total,str_seconds,str_divpretotal,str_limits_prefixs[salir ? i : i-1],str_pretotal);
-						}
-						else	{
-							sprintf(buffer,"\r[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\r",str_total,str_seconds,str_divpretotal,str_limits_prefixs[salir ? i : i-1],str_pretotal);
-						}
-					}
-					free(str_divpretotal);
+                                str_seconds  = seconds.GetBase10();
+                                str_pretotal = pretotal.GetBase10();
+                                str_total    = total.GetBase10();
 
-				}
-				printf("%s",buffer);
-				fflush(stdout);
-				THREADOUTPUT = 0;			
+                                if (pretotal.IsLower(&int_limits[0])) {
+                                        if (FLAGMATRIX) {
+                                                sprintf(buffer,
+                                                        "[+] Total %s keys in %s seconds: %s keys/s\n",
+                                                        str_total, str_seconds, str_pretotal);
+                                        } else {
+                                                sprintf(buffer,
+                                                        "\r[+] Total %s keys in %s seconds: %s keys/s\r",
+                                                        str_total, str_seconds, str_pretotal);
+                                        }
+                                } else {
+                                        i = 0;
+                                        salir = 0;
+                                        while (i < 6 && !salir) {
+                                                if (pretotal.IsLower(&int_limits[i+1])) {
+                                                        salir = 1;
+                                                } else {
+                                                        i++;
+                                                }
+                                        }
+
+                                        if (!salir) {
+                                                i--;
+                                        }
+
+                                        div_pretotal.Set(&pretotal);
+                                        div_pretotal.Div(&int_limits[i]);
+                                        str_divpretotal = div_pretotal.GetBase10();
+
+                                        if (FLAGMATRIX) {
+                                                sprintf(buffer,
+                                                        "[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\n",
+                                                        str_total, str_seconds,
+                                                        str_divpretotal, str_limits_prefixs[i],
+                                                        str_pretotal);
+                                        } else if (THREADOUTPUT == 1) {
+                                                sprintf(buffer,
+                                                        "\r[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\r",
+                                                        str_total, str_seconds,
+                                                        str_divpretotal, str_limits_prefixs[i],
+                                                        str_pretotal);
+                                        }
+                                        free(str_divpretotal);
+                                }
+
+                                print_status(buffer);
+                                THREADOUTPUT = 0;
 #ifdef _WIN64
-				ReleaseMutex(bsgs_thread);
+                                ReleaseMutex(bsgs_thread);
 #else
-				pthread_mutex_unlock(&bsgs_thread);
+                                pthread_mutex_unlock(&bsgs_thread);
 #endif
 
-				free(str_seconds);
-				free(str_pretotal);
-				free(str_total);
-			}
-		}
+                                free(str_seconds);
+                                free(str_pretotal);
+                                free(str_total);
+                        }
+                }
        }while(continue_flag);
        printf("\nEnd\n");
        if (FLAGBPTABLEMAPPED) {
