@@ -41,9 +41,16 @@ public:
 
 void ripemd160(unsigned char *input,int length,unsigned char *digest);
 void ripemd160_32(unsigned char *input, unsigned char *digest);
+#if defined(__x86_64__) || defined(__SSE__)
 void ripemd160sse_32(uint8_t *i0, uint8_t *i1, uint8_t *i2, uint8_t *i3,
   uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
 void ripemd160sse_test();
+#define ripemd160_simd_32 ripemd160sse_32
+#elif defined(__aarch64__) || defined(__ARM_NEON)
+void ripemd160neon_32(uint8_t *i0, uint8_t *i1, uint8_t *i2, uint8_t *i3,
+  uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
+#define ripemd160_simd_32 ripemd160neon_32
+#endif
 std::string ripemd160_hex(unsigned char *digest);
 
 static inline bool ripemd160_comp_hash(uint8_t *h0, uint8_t *h1) {

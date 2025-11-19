@@ -134,7 +134,19 @@ int THREADOUTPUT = 0;
 char *bit_range_str_min;
 char *bit_range_str_max;
 
-const char *bsgs_modes[5] = {"secuential","backward","both","random","dance"};
+const char *bsgs_modes[6] = {"secuential","backward","both","random","dance","ggsb"};
+
+enum {
+        BSGS_MODE_GGSB = 5
+};
+
+struct BsgsGgsbConfig {
+        bool enabled;
+        uint64_t block_count;
+        uint64_t block_size;
+};
+
+BsgsGgsbConfig bsgs_ggsb = {false, 0, 0};
 
 pthread_t *tid = NULL;
 pthread_mutex_t write_keys;
@@ -342,13 +354,25 @@ int main(int argc, char **argv)	{
 		rseed(clock() + time(NULL) + rand()*rand());
 	}
 	
-	port = PORT;
-	IP = (char*)ip_default;
-	
-	
-	printf("[+] Version %s, developed by AlbertoBSD\n",version);
+        port = PORT;
+        IP = (char*)ip_default;
 
-	while ((c = getopt(argc, argv, "6hk:n:t:p:i:")) != -1) {
+        for(int i = 1; i < argc; i++){
+                if(strcmp(argv[i],"--bsgs-block-count") == 0 && (i + 1) < argc){
+                        bsgs_ggsb.block_count = strtoull(argv[i+1], NULL, 10);
+                        bsgs_ggsb.enabled = bsgs_ggsb.block_count > 0;
+                        i++;
+                } else if(strcmp(argv[i],"--bsgs-block-size") == 0 && (i + 1) < argc){
+                        bsgs_ggsb.block_size = strtoull(argv[i+1], NULL, 10);
+                        bsgs_ggsb.enabled = bsgs_ggsb.block_size > 0;
+                        i++;
+                }
+        }
+
+
+        printf("[+] Version %s, developed by AlbertoBSD\n",version);
+
+        while ((c = getopt(argc, argv, "6hk:n:t:p:i:B:")) != -1) {
 		switch(c) {
 			case '6':
 				FLAGSKIPCHECKSUM = 1;
@@ -365,6 +389,15 @@ int main(int argc, char **argv)	{
 					KFACTOR = 1;
 				}
 				printf("[+] K factor %i\n",KFACTOR);
+			break;
+			case 'B':
+				index_value = indexOf(optarg,bsgs_modes,6);
+				if(index_value >= 0 && index_value <= 5){
+					FLAGBSGSMODE = index_value;
+					if(index_value == BSGS_MODE_GGSB){
+						bsgs_ggsb.enabled = true;
+					}
+				}
 			break;
 			case 'n':
 				// Set FLAG_N and str_N
@@ -448,6 +481,26 @@ int main(int argc, char **argv)	{
 		if(BSGS_N.HasSqrt())	{	//If the root is exact
 			BSGS_M.Set(&BSGS_N);
 			BSGS_M.ModSqrt();
+			if(bsgs_ggsb.enabled){
+				uint64_t m_val = BSGS_M.GetInt64();
+				if(bsgs_ggsb.block_count == 0 && bsgs_ggsb.block_size == 0){
+					bsgs_ggsb.block_count = 1;
+				}
+				if(bsgs_ggsb.block_count > 0 && bsgs_ggsb.block_size == 0){
+					bsgs_ggsb.block_size = (m_val + bsgs_ggsb.block_count - 1) / bsgs_ggsb.block_count;
+				} else if(bsgs_ggsb.block_size > 0 && bsgs_ggsb.block_count == 0){
+					bsgs_ggsb.block_count = (m_val + bsgs_ggsb.block_size - 1) / bsgs_ggsb.block_size;
+				}
+				if(bsgs_ggsb.block_count == 0){
+					bsgs_ggsb.block_count = 1;
+				}
+				if(bsgs_ggsb.block_size == 0){
+					bsgs_ggsb.block_size = m_val;
+				}
+			} else {
+				bsgs_ggsb.block_count = 0;
+				bsgs_ggsb.block_size = 0;
+			}
 		}
 		else	{
 			fprintf(stderr,"[E] -n param doesn't have exact square root\n");
@@ -1613,19 +1666,23 @@ void *thread_process_bsgs(void *vargp)	{
 	Int dx[CPU_GRP_SIZE / 2 + 1];
 	Point pts[CPU_GRP_SIZE];
 
-	Int dy;
-	Int dyn;
-	Int _s;
-	Int _p;
-	Int km,intaux;
-	Point pp;
-	Point pn;
+        Int dy;
+        Int dyn;
+        Int _s;
+        Int _p;
+        Int km,intaux;
+        Point pp;
+        Point pn;
+        unsigned char giant_xpoints[CPU_GRP_SIZE][BSGS_BUFFERXPOINTLENGTH];
+        uint8_t giant_first_byte[CPU_GRP_SIZE];
+        uint32_t giant_bucket_positions[CPU_GRP_SIZE];
+        uint32_t giant_bucket_offsets[257];
 	grp->Set(dx);
 	
 
 	
-	cycles = bsgs_aux / 1024;
-	if(bsgs_aux % 1024 != 0)	{
+	cycles = bsgs_aux / CPU_GRP_SIZE;
+	if(bsgs_aux % CPU_GRP_SIZE != 0)	{
 		cycles++;
 	}
 
@@ -1789,17 +1846,52 @@ pn.y.ModAdd(&GSn[i].y);
 
 				pts[0] = pn;
 				
-				for(int i = 0; i<CPU_GRP_SIZE && bsgs_found == 0; i++) {
-					
-					pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
-					
-					r = bloom_check(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
-					
-					if(r) {
-						r = bsgs_secondcheck(&base_key,((j*1024) + i),&keyfound);
+				uint32_t bucket_counts[256] = {0};
+
+				for(int i = 0; i < CPU_GRP_SIZE; i++) {
+					pts[i].x.Get32Bytes(giant_xpoints[i]);
+					uint8_t bucket = giant_xpoints[i][0];
+					giant_first_byte[i] = bucket;
+					bucket_counts[bucket]++;
+				}
+
+				giant_bucket_offsets[0] = 0;
+				for(int bucket = 0; bucket < 256; bucket++) {
+					giant_bucket_offsets[bucket + 1] = giant_bucket_offsets[bucket] + bucket_counts[bucket];
+				}
+
+				for(int bucket = 0; bucket < 256; bucket++) {
+					bucket_counts[bucket] = 0;
+				}
+
+				for(int i = 0; i < CPU_GRP_SIZE; i++) {
+					uint8_t bucket = giant_first_byte[i];
+					uint32_t pos = giant_bucket_offsets[bucket] + bucket_counts[bucket]++;
+					giant_bucket_positions[pos] = i;
+				}
+
+				for(int bucket = 0; bucket < 256 && bsgs_found == 0; bucket++) {
+					uint32_t start = giant_bucket_offsets[bucket];
+					uint32_t end = giant_bucket_offsets[bucket + 1];
+
+					if(start == end) {
+						continue;
+					}
+
+					struct bloom *primary = &bloom_bP[bucket];
+
+					for(uint32_t pos = start; pos < end && bsgs_found == 0; pos++) {
+						int i = (int)giant_bucket_positions[pos];
+
+						if(!bloom_check(primary,(char*)giant_xpoints[i],BSGS_BUFFERXPOINTLENGTH)) {
+							continue;
+						}
+
+						r = bsgs_secondcheck(&base_key,((j*CPU_GRP_SIZE) + i),&keyfound);
 						if(r)	{
 							hextemp = keyfound.GetBase16();
-							printf("[+] Thread Key found privkey %s   \n",hextemp);
+							printf("[+] Thread Key found privkey %s   
+",hextemp);
 							point_found = secp->ComputePublicKey(&keyfound);
 							aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed,point_found);
 							printf("[+] Publickey %s\n",aux_c);
@@ -1816,12 +1908,9 @@ pn.y.ModAdd(&GSn[i].y);
 							free(aux_c);
 							bsgs_found = 1;
 
-						} //End if second check
-						
-					}//End if first check
-					
-				}// For for pts variable
-				
+						}
+					}
+				}
 				// Next start point (startP += (bsSize*GRP_SIZE).G)
 				
 				pp = startP;
@@ -2307,14 +2396,17 @@ bin_publickey to generate the binary address, which is stored in dst_address. */
 void menu() {
 	printf("\nUsage:\n");
 	printf("-h          show this help\n");
+	printf("-B Mode     BSGS modes <sequential, backward, both, random, dance, ggsb>\n");
 	printf("-k value    Use this only with bsgs mode, k value is factor for M, more speed but more RAM use wisely\n");
         printf("            K must not exceed the maximum allowed for N (see table below)\n");
 	printf("-n number   Check for N sequential numbers before the random chosen, this only works with -R option\n");
         printf("            Use -n to set the N for the BSGS process. Bigger N more RAM needed (N >= 2^20)\n");
         printf("            Valid N and K pairs are listed below\n");
 	printf("-t tn       Threads number, must be a positive integer\n");
-	printf("-p port     TCP port Number for listening conections");
-	printf("-i ip		IP Address for listening conections");
+	printf("-p port     TCP port Number for listening conections\n");
+	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
+	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
+	printf("-i ip		IP Address for listening conections\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
         printf("\nExample:\n\n");

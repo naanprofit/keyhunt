@@ -11,6 +11,8 @@ Same as keyhunt we need to do
  - `-6` To skip file checksum
  - `-t number` Threads Number
  - `-k factor` Same K factor dor keyhunt
+ - `-B ggsb`  Enable the Grumpy Giants and Strolling Babies mode for BSGS scheduling
+ - `--bsgs-block-count` / `--bsgs-block-size` Optional GGSB partitioning controls
  - `-n number` Length of the Range to scan each cycle, same as keyhunt
  - `-i ip`     IP for listening default is `127.0.0.1`
  - `-p port`   Port for listening default is `8080`

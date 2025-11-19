@@ -195,35 +195,70 @@ private:
 
 // Inline routines
 
+#if defined(__x86_64__) || defined(_M_X64)
 #ifndef _WIN64
-
-// Missing intrinsics
-static uint64_t inline _umul128(uint64_t a, uint64_t b, uint64_t *h) {
+// Missing intrinsics for non-Windows x86_64
+static inline uint64_t _umul128(uint64_t a, uint64_t b, uint64_t *h) {
   uint64_t rhi;
   uint64_t rlo;
-  __asm__( "mulq  %[b];" :"=d"(rhi),"=a"(rlo) :"1"(a),[b]"rm"(b));
-    *h = rhi;
-    return rlo;
+  __asm__("mulq  %[b];" :"=d"(rhi),"=a"(rlo) :"1"(a),[b]"rm"(b));
+  *h = rhi;
+  return rlo;
 }
 
-static uint64_t inline __shiftright128(uint64_t a, uint64_t b,unsigned char n) {
+static inline uint64_t __shiftright128(uint64_t a, uint64_t b,unsigned char n) {
   uint64_t c;
-  __asm__ ("movq %1,%0;shrdq %3,%2,%0;" : "=D"(c) : "r"(a),"r"(b),"c"(n));
-  return  c;
+  __asm__("movq %1,%0;shrdq %3,%2,%0;" : "=D"(c) : "r"(a),"r"(b),"c"(n));
+  return c;
 }
 
-
-static uint64_t inline __shiftleft128(uint64_t a, uint64_t b,unsigned char n) {
+static inline uint64_t __shiftleft128(uint64_t a, uint64_t b,unsigned char n) {
   uint64_t c;
-  __asm__ ("movq %1,%0;shldq %3,%2,%0;" : "=D"(c) : "r"(b),"r"(a),"c"(n));
-  return  c;
+  __asm__("movq %1,%0;shldq %3,%2,%0;" : "=D"(c) : "r"(b),"r"(a),"c"(n));
+  return c;
 }
-
-#define _subborrow_u64(a,b,c,d) __builtin_ia32_sbb_u64(a,b,c,(long long unsigned int*)d);
-#define _addcarry_u64(a,b,c,d) __builtin_ia32_addcarryx_u64(a,b,c,(long long unsigned int*)d);
 #define _byteswap_uint64 __builtin_bswap64
 #else
 #include <intrin.h>
+#endif
+#else  // Portable implementations for non-x86 targets
+static inline uint64_t _umul128(uint64_t a, uint64_t b, uint64_t *h) {
+  unsigned __int128 r = (unsigned __int128)a * b;
+  *h = (uint64_t)(r >> 64);
+  return (uint64_t)r;
+}
+
+static inline uint64_t __shiftright128(uint64_t a, uint64_t b, unsigned char n) {
+  return (uint64_t)((((unsigned __int128)b << 64) | a) >> n);
+}
+
+static inline uint64_t __shiftleft128(uint64_t a, uint64_t b, unsigned char n) {
+  return (uint64_t)(((unsigned __int128)b << n) | (a >> (64 - n)));
+}
+
+#define _byteswap_uint64 __builtin_bswap64
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+#ifndef _WIN64
+#define _addcarry_u64(a,b,c,d) __builtin_ia32_addcarryx_u64(a,b,c,(unsigned long long*)d)
+#define _subborrow_u64(a,b,c,d) __builtin_ia32_sbb_u64(a,b,c,(unsigned long long*)d)
+#else
+#include <intrin.h>
+#endif
+#else
+static inline unsigned char _addcarry_u64(unsigned char c, uint64_t a, uint64_t b, uint64_t *out) {
+  unsigned __int128 sum = (unsigned __int128)a + b + c;
+  *out = (uint64_t)sum;
+  return (unsigned char)(sum >> 64);
+}
+
+static inline unsigned char _subborrow_u64(unsigned char c, uint64_t a, uint64_t b, uint64_t *out) {
+  unsigned __int128 sub = (unsigned __int128)b + c;
+  unsigned char borrow = a < sub;
+  *out = a - sub;
+  return borrow;
+}
 #endif
 
 static void inline imm_mul(uint64_t *x, uint64_t y, uint64_t *dst) {

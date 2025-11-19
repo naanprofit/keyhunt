@@ -28,12 +28,27 @@ void sha256_33(uint8_t *input, uint8_t *digest);
 void sha256_65(uint8_t *input, uint8_t *digest);
 void sha256_checksum(uint8_t *input, int length, uint8_t *checksum);
 bool sha256_file(const char* file_name, uint8_t* checksum);
+#if defined(__x86_64__) || defined(__SSE__)
 void sha256sse_1B(uint32_t *i0, uint32_t *i1, uint32_t *i2, uint32_t *i3,
   uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
 void sha256sse_2B(uint32_t *i0, uint32_t *i1, uint32_t *i2, uint32_t *i3,
   uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
 void sha256sse_checksum(uint32_t *i0, uint32_t *i1, uint32_t *i2, uint32_t *i3,
   uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
+#define sha256_simd_1B sha256sse_1B
+#define sha256_simd_2B sha256sse_2B
+#define sha256_simd_checksum sha256sse_checksum
+#elif defined(__aarch64__) || defined(__ARM_NEON)
+void sha256neon_1B(uint32_t *i0, uint32_t *i1, uint32_t *i2, uint32_t *i3,
+  uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
+void sha256neon_2B(uint32_t *i0, uint32_t *i1, uint32_t *i2, uint32_t *i3,
+  uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
+void sha256neon_checksum(uint32_t *i0, uint32_t *i1, uint32_t *i2, uint32_t *i3,
+  uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
+#define sha256_simd_1B sha256neon_1B
+#define sha256_simd_2B sha256neon_2B
+#define sha256_simd_checksum sha256neon_checksum
+#endif
 std::string sha256_hex(unsigned char *digest);
 void sha256sse_test();
 

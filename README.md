@@ -126,6 +126,10 @@ First compile:
 make
 ```
 
+On ARM64 (`aarch64`) hosts the Makefile automatically sets `-march=armv8-a -mtune=generic`
+and uses the portable `hash/ripemd160.cpp` and `hash/sha256.cpp` implementations, skipping
+the SSE-specific sources.
+
 if you have problems compiling the `main` version you can compile the `legacy` version
 
 ```
@@ -301,6 +305,8 @@ All the vanity address and his privatekeys will be saved in the file `VANITYKEYF
 rmd stands for RIPE Message Digest (see https://en.wikipedia.org/wiki/RIPEMD )
 
 mode rmd160 work in the same way than address, but the diference is that file need to have hash rmd160 instead of addresses.
+
+You can tune the rmd160 batch size with `--rmd-batch-size <n>` (multiple of 4, max 1024). Smaller values can help machines with tighter cache or memory bandwidth limits, while the default 1024 remains fastest on most systems.
 
 
 example file `tests/1to32.rmd` :
@@ -743,6 +749,28 @@ Line of execution in random mode `-R` or -B random
 ```./keyhunt -m bsgs -f tests/125.txt -b 125 -q -s 10 -R```
 
 ```./keyhunt -m bsgs -f tests/125.txt -b 125 -q -s 10 -B random```
+
+GGSB mode can be selected with `-B ggsb`. Pair it with either `--bsgs-block-count <n>` or `--bsgs-block-size <n>` to describe how the baby table should be segmented; if only one is supplied the other is derived automatically. Leaving both unset keeps a single block so classic behaviour is preserved.
+
+Example table creation and search in GGSB mode:
+
+```bash
+./keyhunt -m bsgs -f tests/125.txt -b 125 -q -s 10 -S -B ggsb --bsgs-block-count 4
+```
+
+Run the BSGS daemon with the same layout:
+
+```bash
+./bsgsd -k 4096 -t 8 -6 -B ggsb --bsgs-block-count 4
+```
+
+**Quick sanity check without huge files**: use a tiny range and small `-k` to confirm the pipeline before scaling up, e.g.
+
+```bash
+./keyhunt -m bsgs -f tests/1to63_65.txt -k 8 -r 0:1000000 -q -S --tmpdir ./bloomfiles
+```
+
+This builds only a few MB of blooms and a small bPtable so you can validate your flags. Large ranges (e.g., `-n 0x40000000000000` with large `-k`) will legitimately create tens of GB per bloom layer because table creation still uses a single classic block even if `--bsgs-block-count` is provided.
 
 
 Example Output:

@@ -19,14 +19,15 @@
 #include "Random.h"
 
 #if defined(_WIN64) && !defined(__CYGWIN__)
+#elif defined(__APPLE__)
+#include <stdlib.h>
 #else
 #include <sys/random.h>
-#endif
-
 #ifdef __unix__
 #ifdef __CYGWIN__
 #else
 #include <linux/random.h>
+#endif
 #endif
 #endif
 
@@ -124,10 +125,16 @@ void rseed(unsigned long seed) {
 unsigned long rndl() {
 	return rk_random(&localState);
 }
+#elif defined(__APPLE__)
+unsigned long rndl() {
+        unsigned long r;
+        arc4random_buf(&r, sizeof(unsigned long));
+        return r;
+}
 #else
 unsigned long rndl() {
-	unsigned long r;
-	int bytes_read = getrandom(&r, sizeof(unsigned long), GRND_NONBLOCK );
+        unsigned long r;
+        int bytes_read = getrandom(&r, sizeof(unsigned long), GRND_NONBLOCK );
 	if (bytes_read > 0) {
 		return r;
 	}
