@@ -39,11 +39,19 @@ email: albertobsd@gmail.com
 #include <pthread.h>
 #include <sys/random.h>
 #include <getopt.h>
+#if !defined(__APPLE__)
 #include <sys/sysinfo.h>
+#endif
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <sys/statvfs.h>
 #include <sys/stat.h>
+#endif
+
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <mach/mach.h>
+#include <mach/mach_host.h>
 #endif
 
 #ifdef __unix__
@@ -7148,6 +7156,18 @@ uint64_t get_available_ram(){
                return statex.ullAvailPhys;
        }
        return 0;
+#elif defined(__APPLE__)
+       mach_port_t host_port = mach_host_self();
+       vm_size_t page_size = 0;
+       mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
+       vm_statistics64_data_t vm_stat;
+       if(host_page_size(host_port, &page_size) != KERN_SUCCESS){
+               page_size = (vm_size_t)sysconf(_SC_PAGESIZE);
+       }
+       if(host_statistics64(host_port, HOST_VM_INFO, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS){
+               return (uint64_t)vm_stat.free_count * (uint64_t)page_size;
+       }
+       return 0;
 #else
        struct sysinfo info;
        if (sysinfo(&info) == 0) {
@@ -7169,6 +7189,14 @@ bool warn_if_insufficient_ram(uint64_t need_bytes) {
                                 (double)need_bytes/1048576.0, (double)avail/1048576.0);
                         return false;
                 }
+        }
+#elif defined(__APPLE__)
+        uint64_t avail = get_available_ram();
+        if(avail && need_bytes > avail){
+                fprintf(stderr,
+                        "[W] Bloom filter of %.2f MB exceeds available RAM %.2f MB, consider using --mapped.\n",
+                        (double)need_bytes/1048576.0, (double)avail/1048576.0);
+                return false;
         }
 #else
         struct sysinfo info;
