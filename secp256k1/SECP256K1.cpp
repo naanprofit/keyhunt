@@ -15,13 +15,137 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 #include "SECP256k1.h"
 #include "Point.h"
 #include "../util.h"
 #include "../hash/sha256.h"
 #include "../hash/ripemd160.h"
+
+namespace {
+
+using Uint256 = std::array<uint64_t, 4>;
+using Uint512 = std::array<uint64_t, 8>;
+
+static Uint256 IntToUint256(const Int &value) {
+  Uint256 out{};
+  for (size_t i = 0; i < 4; ++i) {
+    out[i] = value.bits64[i];
+  }
+  return out;
+}
+
+static void Uint256ToInt(const Uint256 &src, Int &dst) {
+  for (size_t i = 0; i < 4; ++i) {
+    dst.bits64[i] = src[i];
+  }
+  dst.bits64[4] = 0;
+}
+
+static void Mul256(const Uint256 &a, const Uint256 &b, Uint512 &out) {
+  out.fill(0);
+  for (size_t i = 0; i < 4; ++i) {
+    unsigned __int128 carry = 0;
+    for (size_t j = 0; j < 4; ++j) {
+      unsigned __int128 prod = static_cast<unsigned __int128>(a[i]) * static_cast<unsigned __int128>(b[j]);
+      unsigned __int128 sum = prod + static_cast<unsigned __int128>(out[i + j]) + carry;
+      out[i + j] = static_cast<uint64_t>(sum);
+      carry = sum >> 64;
+    }
+    size_t pos = i + 4;
+    while (carry != 0 && pos < out.size()) {
+      unsigned __int128 sum = static_cast<unsigned __int128>(out[pos]) + (carry & 0xFFFFFFFFFFFFFFFFULL);
+      out[pos] = static_cast<uint64_t>(sum);
+      carry = sum >> 64;
+      ++pos;
+    }
+  }
+}
+
+static void AddBit(Uint512 &value, int bit) {
+  size_t idx = static_cast<size_t>(bit / 64);
+  uint64_t mask = 1ULL << (bit % 64);
+  uint64_t carry = mask;
+  for (size_t i = idx; i < value.size() && carry; ++i) {
+    uint64_t prev = value[i];
+    value[i] += carry;
+    carry = value[i] < prev ? 1ULL : 0ULL;
+  }
+}
+
+static Uint256 ShiftRight(const Uint512 &value, int shiftBits) {
+  Uint256 result{};
+  int wordShift = shiftBits / 64;
+  int bitShift = shiftBits % 64;
+  for (int i = wordShift; i < static_cast<int>(value.size()); ++i) {
+    uint64_t low = value[i];
+    uint64_t high = (i + 1 < static_cast<int>(value.size())) ? value[i + 1] : 0;
+    uint64_t combined = bitShift == 0 ? low : (low >> bitShift) | (high << (64 - bitShift));
+    int dest = i - wordShift;
+    if (dest >= 0 && dest < static_cast<int>(result.size())) {
+      result[dest] = combined;
+    }
+  }
+  return result;
+}
+
+static void ComputeWNAF(Int value, unsigned int window, std::vector<int8_t> &wnaf) {
+  wnaf.clear();
+  if (value.IsZero()) {
+    return;
+  }
+
+  Int twoPowW;
+  twoPowW.SetInt32(1);
+  twoPowW.ShiftL(window);
+  Int half(twoPowW);
+  half.ShiftR(1);
+
+  while (!value.IsZero()) {
+    int8_t digit = 0;
+    if (value.IsOdd()) {
+      Int mod(value);
+      mod.Mod(&twoPowW);
+      uint64_t modVal = mod.bits64[0];
+      if (modVal > half.bits64[0]) {
+        modVal -= twoPowW.bits64[0];
+      }
+      digit = static_cast<int8_t>(modVal);
+      Int adjust;
+      adjust.SetInt32(static_cast<uint32_t>(digit > 0 ? digit : -digit));
+      if (digit > 0) {
+        value.Sub(&adjust);
+      } else {
+        value.Add(&adjust);
+      }
+    }
+    wnaf.push_back(digit);
+    value.ShiftR(1);
+  }
+}
+
+static unsigned int ChoosePippengerWindow(size_t nPoints) {
+  if (nPoints <= 2) {
+    return 3;
+  }
+  if (nPoints <= 4) {
+    return 4;
+  }
+  if (nPoints <= 8) {
+    return 5;
+  }
+  if (nPoints <= 16) {
+    return 6;
+  }
+  return 7;
+}
+
+}
 
 Secp256K1::Secp256K1() {
 }
@@ -40,18 +164,38 @@ void Secp256K1::Init() {
   order.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 
   Int::InitK1(&order);
+  lambda.SetBase16("5363AD4CC05C30E0A5261C028812645A122E22EA20816678DF02967C1B23BD72");
+  minus_b1.SetBase16("00000000000000000000000000000000E4437ED6010E88286F547FA90ABFE4C3");
+  minus_b2.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE8A280AC50774346DD765CDA83DB1562C");
+  g1Const.SetBase16("3086D221A7D46BCDE86C90E49284EB153DAA8A1471E8CA7FE893209A45DBB031");
+  g2Const.SetBase16("E4437ED6010E88286F547FA90ABFE4C4221208AC9DF506C61571B4AE8AC47F71");
 
-  // Compute Generator table
-  Point N(G);
-  for(int i = 0; i < 32; i++) {
-    GTable[i * 256] = N;
-    N = DoubleDirect(N);
-    for (int j = 1; j < 255; j++) {
-      GTable[i * 256 + j] = N;
-      N = AddDirect(N, GTable[i * 256]);
-    }
-    GTable[i * 256 + 255] = N; // Dummy point for check function
+  Int three;
+  three.SetInt32(3);
+  Int minusThree(&three);
+  minusThree.ModNeg();
+  Int sqrtMinusThree(&minusThree);
+  sqrtMinusThree.ModSqrt();
+  Int one;
+  one.SetInt32(1);
+  Int two;
+  two.SetInt32(2);
+  Int invTwo(&two);
+  invTwo.ModInv();
+
+  beta.Set(&sqrtMinusThree);
+  beta.ModSub(&one);
+  beta.ModMul(&invTwo);
+  if (beta.IsOne()) {
+    Int alt(&sqrtMinusThree);
+    alt.ModNeg();
+    alt.ModSub(&one);
+    alt.ModMul(&invTwo);
+    beta.Set(&alt);
   }
+
+  baseWindow = 7;
+  baseOddMultiples = BuildOddMultiples(G, baseWindow);
 
 }
 
@@ -59,26 +203,95 @@ Secp256K1::~Secp256K1() {
 }
 
 Point Secp256K1::ComputePublicKey(Int *privKey) {
-  int i = 0;
-  uint8_t b;
-  Point Q;
-  Q.Clear();
-  // Search first significant byte
-  for (i = 0; i < 32; i++) {
-    b = privKey->GetByte(i);
-    if(b)
-      break;
-  }
-  Q = GTable[256 * i + (b-1)];
-  i++;
+  return ScalarBaseMultiplication(privKey);
+}
 
-  for(; i < 32; i++) {
-    b = privKey->GetByte(i);
-    if(b)
-      Q = Add2(Q, GTable[256 * i + (b-1)]);
+std::vector<Point> Secp256K1::BuildOddMultiples(Point base, unsigned int window) {
+  if (window < 2) {
+    window = 2;
   }
-  Q.Reduce();
-  return Q;
+  size_t tableSize = 1u << (window - 2);
+  std::vector<Point> table(tableSize);
+  if (base.z.IsZero()) {
+    for (auto &p : table) {
+      p.Clear();
+    }
+    return table;
+  }
+  if (!base.z.IsOne()) {
+    base.Reduce();
+  }
+  table[0] = base;
+  if (tableSize == 1) {
+    return table;
+  }
+  Point twoP = DoubleDirect(base);
+  twoP.Reduce();
+  Point current = base;
+  for (size_t i = 1; i < tableSize; ++i) {
+    current = AddDirect(current, twoP);
+    current.Reduce();
+    table[i] = current;
+  }
+  return table;
+}
+
+Point Secp256K1::ApplyEndomorphism(Point &p) {
+  Point affine(p);
+  if (affine.z.IsZero()) {
+    return affine;
+  }
+  if (!affine.z.IsOne()) {
+    affine.Reduce();
+  }
+  affine.x.ModMulK1(&affine.x, &beta);
+  affine.z.SetInt32(1);
+  return affine;
+}
+
+void Secp256K1::DecomposeScalar(Int *scalar, Int &r1, Int &r2) {
+  Int k(scalar);
+  k.Mod(&order);
+
+  Uint256 kArr = IntToUint256(k);
+  Uint256 g1Arr = IntToUint256(g1Const);
+  Uint256 g2Arr = IntToUint256(g2Const);
+
+  Uint512 prod1;
+  Mul256(kArr, g1Arr, prod1);
+  AddBit(prod1, 383);
+  Uint256 c1Arr = ShiftRight(prod1, 384);
+
+  Uint512 prod2;
+  Mul256(kArr, g2Arr, prod2);
+  AddBit(prod2, 383);
+  Uint256 c2Arr = ShiftRight(prod2, 384);
+
+  Int c1;
+  Uint256ToInt(c1Arr, c1);
+  Int c2;
+  Uint256ToInt(c2Arr, c2);
+
+  Int term1(&minus_b1);
+  term1.ModMulK1order(&c1);
+  Int term2(&minus_b2);
+  term2.ModMulK1order(&c2);
+
+  Int sum;
+  sum.ModAddK1order(&term1, &term2);
+
+  Int prodLambda(sum);
+  prodLambda.ModMulK1order(&lambda);
+
+  Int r1tmp(&k);
+  r1tmp.Sub(&prodLambda);
+  if (r1tmp.IsNegative()) {
+    r1tmp.Add(&order);
+  }
+  r1tmp.Mod(&order);
+
+  r1.Set(&r1tmp);
+  r2.Set(&sum);
 }
 
 Point Secp256K1::NextKey(Point &key) {
@@ -486,29 +699,277 @@ bool Secp256K1::EC(Point &p) {
   return _s.IsZero(); // ( ((pow2(y) - (pow3(x) + 7)) % P) == 0 );
 }
 
-Point Secp256K1::ScalarMultiplication(Point &P,Int *scalar)	{
-	Point R,Q,T;
-	int  no_of_bits, loop;
-	no_of_bits = scalar->GetBitLength();
-	R.Clear();
-	R.z.SetInt32(1);
-	if(!scalar->IsZero())	{
-		Q.Set(P);
-		if(scalar->GetBit(0) == 1)	{
-			R.Set(P);
-		}
-		for(loop = 1; loop < no_of_bits; loop++) {
-			T = Double(Q);
-			Q.Set(T);
-			T.Set(R);
-			if(scalar->GetBit(loop)){
-				R = Add(T,Q);
-			}
-		}
-	}
-	R.Reduce();
-	return R;
+Point Secp256K1::ScalarBaseMultiplication(Int *scalar) {
+  Point result;
+  result.Clear();
+  Int k(scalar);
+  k.Mod(&order);
+
+  std::vector<int8_t> wnaf;
+  ComputeWNAF(k, baseWindow, wnaf);
+  if (wnaf.empty()) {
+    return result;
+  }
+  if (baseOddMultiples.empty()) {
+    baseOddMultiples = BuildOddMultiples(G, baseWindow);
+  }
+
+  for (int i = static_cast<int>(wnaf.size()) - 1; i >= 0; --i) {
+    if (!result.z.IsZero()) {
+      Point dbl = Double(result);
+      result.Set(dbl);
+    }
+    int8_t digit = wnaf[static_cast<size_t>(i)];
+    if (digit == 0) {
+      continue;
+    }
+    int absDigit = digit > 0 ? digit : -digit;
+    size_t idx = static_cast<size_t>((absDigit - 1) >> 1);
+    if (idx >= baseOddMultiples.size()) {
+      continue;
+    }
+    Point addend(baseOddMultiples[idx]);
+    if (digit < 0) {
+      addend = Negation(addend);
+    }
+    if (result.z.IsZero()) {
+      result.Set(addend);
+    } else {
+      Point tmp = Add2(result, addend);
+      result.Set(tmp);
+    }
+  }
+
+  if (!result.z.IsZero()) {
+    result.Reduce();
+  }
+  return result;
 }
+
+Point Secp256K1::ScalarMultiplication(Point &P,Int *scalar) {
+  Point result;
+  result.Clear();
+  if (scalar->IsZero() || P.z.IsZero()) {
+    return result;
+  }
+
+  Int r1;
+  Int r2;
+  DecomposeScalar(scalar, r1, r2);
+
+  Int halfOrder(&order);
+  halfOrder.ShiftR(1);
+
+  bool neg1 = false;
+  bool neg2 = false;
+  Int k1Abs;
+  Int k2Abs;
+
+  if (r1.IsGreater(&halfOrder)) {
+    neg1 = true;
+    k1Abs.Set(&order);
+    k1Abs.Sub(&r1);
+  } else {
+    k1Abs.Set(&r1);
+  }
+
+  if (r2.IsGreater(&halfOrder)) {
+    neg2 = true;
+    k2Abs.Set(&order);
+    k2Abs.Sub(&r2);
+  } else {
+    k2Abs.Set(&r2);
+  }
+
+  const unsigned int window = 5;
+  std::vector<int8_t> wnaf1;
+  std::vector<int8_t> wnaf2;
+  ComputeWNAF(k1Abs, window, wnaf1);
+  ComputeWNAF(k2Abs, window, wnaf2);
+
+  Point base(P);
+  if (!base.z.IsZero() && !base.z.IsOne()) {
+    base.Reduce();
+  }
+  Point phiP = ApplyEndomorphism(base);
+  std::vector<Point> table1 = BuildOddMultiples(base, window);
+  std::vector<Point> table2 = BuildOddMultiples(phiP, window);
+
+  size_t maxLen = std::max(wnaf1.size(), wnaf2.size());
+  for (int64_t i = static_cast<int64_t>(maxLen) - 1; i >= 0; --i) {
+    if (!result.z.IsZero()) {
+      Point dbl = Double(result);
+      result.Set(dbl);
+    }
+
+    if (i < static_cast<int64_t>(wnaf1.size())) {
+      int8_t digit = wnaf1[static_cast<size_t>(i)];
+      if (neg1) {
+        digit = -digit;
+      }
+      if (digit != 0) {
+        int absDigit = digit > 0 ? digit : -digit;
+        size_t idx = static_cast<size_t>((absDigit - 1) >> 1);
+        if (idx < table1.size()) {
+          Point addend(table1[idx]);
+          if (digit < 0) {
+            addend = Negation(addend);
+          }
+          if (result.z.IsZero()) {
+            result.Set(addend);
+          } else {
+            Point tmp = Add2(result, addend);
+            result.Set(tmp);
+          }
+        }
+      }
+    }
+
+    if (i < static_cast<int64_t>(wnaf2.size())) {
+      int8_t digit = wnaf2[static_cast<size_t>(i)];
+      if (neg2) {
+        digit = -digit;
+      }
+      if (digit != 0) {
+        int absDigit = digit > 0 ? digit : -digit;
+        size_t idx = static_cast<size_t>((absDigit - 1) >> 1);
+        if (idx < table2.size()) {
+          Point addend(table2[idx]);
+          if (digit < 0) {
+            addend = Negation(addend);
+          }
+          if (result.z.IsZero()) {
+            result.Set(addend);
+          } else {
+            Point tmp = Add2(result, addend);
+            result.Set(tmp);
+          }
+        }
+      }
+    }
+  }
+
+  if (!result.z.IsZero()) {
+    result.Reduce();
+  }
+  return result;
+}
+
+Point Secp256K1::MultiScalarMultiplication(const std::vector<Point> &points, const std::vector<Int> &scalars) {
+  Point result;
+  result.Clear();
+  if (points.empty() || points.size() != scalars.size()) {
+    return result;
+  }
+
+  size_t n = points.size();
+  unsigned int window = ChoosePippengerWindow(n);
+  uint32_t bucketCount = (1u << window) - 1;
+
+  std::vector<Point> prepared;
+  prepared.reserve(n);
+  for (const auto &pt : points) {
+    Point copy(pt);
+    if (copy.z.IsZero()) {
+      prepared.push_back(copy);
+      continue;
+    }
+    if (!copy.z.IsOne()) {
+      copy.Reduce();
+    }
+    prepared.push_back(copy);
+  }
+
+  std::vector<std::vector<uint32_t>> scalarDigits(n);
+  size_t maxDigits = 0;
+  Int chunkBase;
+  chunkBase.SetInt32(1);
+  chunkBase.ShiftL(window);
+  uint32_t mask = (1u << window) - 1;
+  for (size_t i = 0; i < n; ++i) {
+    Int k(const_cast<Int *>(&scalars[i]));
+    k.Mod(&order);
+    std::vector<uint32_t> repr;
+    while (!k.IsZero()) {
+      Int mod(k);
+      mod.Mod(&chunkBase);
+      uint32_t digit = static_cast<uint32_t>(mod.bits64[0] & mask);
+      repr.push_back(digit);
+      if (digit != 0) {
+        Int adjust;
+        adjust.SetInt32(digit);
+        k.Sub(&adjust);
+      }
+      k.ShiftR(window);
+    }
+    scalarDigits[i] = repr;
+    if (repr.size() > maxDigits) {
+      maxDigits = repr.size();
+    }
+  }
+
+  Point running;
+  running.Clear();
+  for (int64_t pos = static_cast<int64_t>(maxDigits) - 1; pos >= 0; --pos) {
+    for (unsigned int j = 0; j < window; ++j) {
+      if (!result.z.IsZero()) {
+        Point dbl = Double(result);
+        result.Set(dbl);
+      }
+    }
+
+    std::vector<Point> buckets(bucketCount);
+    for (auto &bucket : buckets) {
+      bucket.Clear();
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+      if (prepared[i].z.IsZero()) {
+        continue;
+      }
+      uint32_t digit = pos < static_cast<int64_t>(scalarDigits[i].size()) ? scalarDigits[i][static_cast<size_t>(pos)] : 0;
+      if (digit == 0) {
+        continue;
+      }
+      size_t idx = static_cast<size_t>(digit - 1);
+      if (idx >= buckets.size()) {
+        continue;
+      }
+      if (buckets[idx].z.IsZero()) {
+        buckets[idx].Set(prepared[i]);
+      } else {
+        Point addend(prepared[i]);
+        Point tmp = Add2(buckets[idx], addend);
+        buckets[idx].Set(tmp);
+      }
+    }
+
+    running.Clear();
+    for (int b = static_cast<int>(bucketCount) - 1; b >= 0; --b) {
+      if (buckets[b].z.IsZero()) {
+        continue;
+      }
+      if (running.z.IsZero()) {
+        running.Set(buckets[b]);
+      } else {
+        Point tmp = Add(running, buckets[b]);
+        running.Set(tmp);
+      }
+      if (result.z.IsZero()) {
+        result.Set(running);
+      } else {
+        Point tmp = Add(result, running);
+        result.Set(tmp);
+      }
+    }
+  }
+
+  if (!result.z.IsZero()) {
+    result.Reduce();
+  }
+  return result;
+}
+
 
 #define KEYBUFFCOMP(buff,p) \
 (buff)[0] = ((p).x.bits[7] >> 8) | ((uint32_t)(0x2 + (p).y.IsOdd()) << 24); \
