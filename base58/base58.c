@@ -41,21 +41,18 @@ bool b58tobin(void *bin, size_t *binszp, const char *b58, size_t b58sz)
 	size_t binsz = *binszp;
 	const unsigned char *b58u = (void*)b58;
 	unsigned char *binu = bin;
-	size_t outisz = (binsz + sizeof(b58_almostmaxint_t) - 1) / sizeof(b58_almostmaxint_t);
-	b58_almostmaxint_t outi[outisz];
-	b58_maxint_t t;
-	b58_almostmaxint_t c;
-	size_t i, j;
-	uint8_t bytesleft = binsz % sizeof(b58_almostmaxint_t);
-	b58_almostmaxint_t zeromask = bytesleft ? (b58_almostmaxint_mask << (bytesleft * 8)) : 0;
-	unsigned zerocount = 0;
-	
-	if (!b58sz)
-		b58sz = strlen(b58);
-	
-	for (i = 0; i < outisz; ++i) {
-		outi[i] = 0;
-	}
+        size_t outisz = (binsz + sizeof(b58_almostmaxint_t) - 1) / sizeof(b58_almostmaxint_t);
+        b58_almostmaxint_t outi[outisz ? outisz : 1];
+        memset(outi, 0, sizeof(outi));
+        b58_maxint_t t;
+        b58_almostmaxint_t c;
+        size_t i, j;
+        uint8_t bytesleft = binsz % sizeof(b58_almostmaxint_t);
+        b58_almostmaxint_t zeromask = bytesleft ? (b58_almostmaxint_mask << (bytesleft * 8)) : 0;
+        unsigned zerocount = 0;
+
+        if (!b58sz)
+                b58sz = strlen(b58);
 	
 	// Leading zeros, just count
 	for (i = 0; i < b58sz && b58u[i] == '1'; ++i)
