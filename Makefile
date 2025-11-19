@@ -1,4 +1,8 @@
 ARCH := $(shell uname -m)
+# Treat Apple Silicon's reported architecture name the same as Linux aarch64
+ifeq ($(ARCH),arm64)
+ARCH := aarch64
+endif
 
 ifeq ($(ARCH),aarch64)
 ARCH_FLAGS := -march=armv8-a -mtune=generic -U__SSE2__
