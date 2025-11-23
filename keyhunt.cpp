@@ -382,6 +382,7 @@ const char *mapped_filename = NULL;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
 uint32_t mapped_chunks = 1;
+int FLAGLOADBLOOM = 0;
 
 const char *bptable_filename = NULL;
 uint64_t bptable_size_override = 0;
@@ -603,6 +604,8 @@ int main(int argc, char **argv)	{
                {"mapped", optional_argument, 0, 0},
                {"mapped-size", required_argument, 0, 0},
                {"mapped-chunks", required_argument, 0, 0},
+               {"bloom-file", required_argument, 0, 0},
+               {"load-bloom", no_argument, 0, 0},
                {"ptable", required_argument, 0, 0},
                {"ptable-size", required_argument, 0, 0},
                {"load-ptable", no_argument, 0, 0},
@@ -641,6 +644,12 @@ int main(int argc, char **argv)	{
                       } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
                               FLAGMAPPED = 1;
                               mapped_chunks = strtoul(optarg, NULL, 10);
+                    } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
+                             FLAGMAPPED = 1;
+                             mapped_filename = optarg;
+                    } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
+                             FLAGMAPPED = 1;
+                             FLAGLOADBLOOM = 1;
                      } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
                              bptable_filename = optarg;
                       } else if (strcmp(long_options[option_index].name, "ptable-size") == 0) {
@@ -6295,14 +6304,16 @@ void menu() {
         printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
         printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
         printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
-	printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
-	printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
-	printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
-	printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
-	printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
-       printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
-       printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
-       printf("--tmpdir dir     Directory for temporary files\n");
+        printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
+        printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
+        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
+        printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
+        printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
+        printf("--load-bloom       Require existing mapped bloom file; do not create a new one\n");
+        printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
+        printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
+        printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
+        printf("--tmpdir dir     Directory for temporary files\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
         printf("\nExample:\n\n");
@@ -7271,48 +7282,69 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                 static bool mapped_override_applied = false;
                 bool r = true;
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
-                const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+               const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
 
-                uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
-                if (!mapped_entries_override) {
-                        char fname_chk[1024];
-                        if (chunks > 1) {
-                                snprintf(fname_chk, sizeof(fname_chk), "%s.%u", mapname, 0);
-                        } else {
-                                snprintf(fname_chk, sizeof(fname_chk), "%s", mapname);
-                        }
-                        struct stat st;
-                        if (stat(fname_chk, &st) == 0) {
-                                if (bloom_load_mmap(bloom_arg, mapname, chunks) == 1) {
-                                        fprintf(stderr, "[E] bloom_load_mmap failed for '%s'\n", mapname);
-                                        r = false;
-                                } else {
-                                        printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
-                                }
-                                return r;
-                        }
-                }
+               uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
 
-                uint64_t total;
-                if (mapped_entries_override && (!mapped_override_applied || items_bloom >= mapped_entries_override)) {
-                        total = mapped_entries_override;
-                        if (!mapped_override_applied) {
-                                mapped_override_applied = true; // apply override only once by default
-                        }
-                } else {
-                        total = (items_bloom <= 10000) ? 10000 : FLAGBLOOMMULTIPLIER * items_bloom;
-                }
+               /* Explicit load-only mode for mapped bloom filters */
+               if(FLAGLOADBLOOM) {
+                       char fname_chk[1024];
+                       if(chunks > 1) {
+                               snprintf(fname_chk,sizeof(fname_chk),"%s.%u",mapname,0);
+                       } else {
+                               snprintf(fname_chk,sizeof(fname_chk),"%s",mapname);
+                       }
+                       struct stat st;
+                       if(stat(fname_chk,&st) != 0) {
+                               fprintf(stderr,"[E] --load-bloom specified but mapped bloom file '%s' does not exist\n",fname_chk);
+                               return false;
+                       }
+                       if(bloom_load_mmap(bloom_arg,mapname,chunks) == 1) {
+                               fprintf(stderr,"[E] bloom_load_mmap failed for '%s'\n",mapname);
+                               return false;
+                       }
+                       printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                       return true;
+               }
+
+               if(!mapped_entries_override) {
+                       char fname_chk[1024];
+                       if(chunks > 1) {
+                               snprintf(fname_chk,sizeof(fname_chk),"%s.%u",mapname,0);
+                       } else {
+                               snprintf(fname_chk,sizeof(fname_chk),"%s",mapname);
+                       }
+                       struct stat st;
+                       if(stat(fname_chk,&st) == 0) {
+                               if(bloom_load_mmap(bloom_arg,mapname,chunks) == 1) {
+                                       fprintf(stderr,"[E] bloom_load_mmap failed for '%s'\n",mapname);
+                                       r = false;
+                               } else {
+                                       printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                               }
+                               return r;
+                       }
+               }
+
+               uint64_t total;
+               if(mapped_entries_override && (!mapped_override_applied || items_bloom >= mapped_entries_override)) {
+                       total = mapped_entries_override;
+                       if(!mapped_override_applied) {
+                               mapped_override_applied = true; // apply override only once by default
+                       }
+               } else {
+                       total = (items_bloom <= 10000) ? 10000 : FLAGBLOOMMULTIPLIER * items_bloom;
+               }
 
                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
-               uint64_t need_bytes = bloom_bytes_for_entries_error(total, error);
-               warn_if_insufficient_disk_space(mapname, need_bytes);
-               if(bloom_init_mmap(bloom_arg,total,error,mapname, mapped_entries_override != 0, chunks) == 1){
-                        fprintf(stderr,"[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",
-                                mapname, need_bytes, total);
-                        r = false;
-                }
-                printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
-                return r;
+               uint64_t need_bytes = bloom_bytes_for_entries_error(total,error);
+               warn_if_insufficient_disk_space(mapname,need_bytes);
+               if(bloom_init_mmap(bloom_arg,total,error,mapname,mapped_entries_override != 0,chunks) == 1) {
+                       fprintf(stderr,"[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",mapname,need_bytes,total);
+                       r = false;
+               }
+               printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+               return r;
         }
         return initBloomFilter(bloom_arg,items_bloom);
 }
