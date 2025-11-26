@@ -2621,7 +2621,7 @@ void menu() {
 	printf("-p port     TCP port Number for listening conections\n");
 	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
 	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
-	printf("--ptable-cache   Enable cached lookup metadata for the bP table\n");
+ printf("--ptable-cache   Enable cached lookup metadata for the bP table when using --load-ptable\n");
 	printf("-i ip		IP Address for listening conections\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();

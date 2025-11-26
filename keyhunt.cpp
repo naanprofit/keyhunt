@@ -6499,7 +6499,7 @@ void menu() {
 	printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
        printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
        printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
-       printf("--ptable-cache   Enable cached lookup metadata for the mapped bP table\n");
+       printf("--ptable-cache   Enable cached lookup metadata for the mapped bP table when using --load-ptable\n");
        printf("--tmpdir dir     Directory for temporary files\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
