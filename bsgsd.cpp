@@ -2140,13 +2140,20 @@ int main(int argc, char **argv)	{
     }
 #endif
 
-    // Setting address parameters
+    // Setting address parameters (with safe defaults)
+    if(port <= 0 || port > 65535) {
+        fprintf(stderr, "[W] Invalid port %d, defaulting to %d\n", port, PORT);
+        port = PORT;
+    }
+
     address.sin_family = AF_INET;
-    if(strcmp(IP,"0.0.0.0") == 0){
+    if(IP == NULL || IP[0] == '\0' || strcmp(IP,"0.0.0.0") == 0){
+        IP = (char*)ip_default;
         address.sin_addr.s_addr = INADDR_ANY;
     } else if(inet_pton(AF_INET, IP, &address.sin_addr) != 1){
-        fprintf(stderr,"[E] Invalid IP address: %s\n", IP);
-        exit(EXIT_FAILURE);
+        fprintf(stderr,"[W] Invalid IP address: %s, defaulting to %s\n", IP, ip_default);
+        IP = (char*)ip_default;
+        address.sin_addr.s_addr = INADDR_ANY;
     }
     address.sin_port = htons(port);
     // Binding socket to address
