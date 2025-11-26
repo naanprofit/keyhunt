@@ -36,4 +36,7 @@ void print_nk_table(void);
 
 uint64_t get_total_ram(void);
 
+int md5_file(const char *path, uint8_t digest[16]);
+void md5_to_hex(const uint8_t digest[16], char hex[33]);
+
 #endif // CUSTOMUTILH

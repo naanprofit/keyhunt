@@ -1,8 +1,8 @@
-#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 #include <inttypes.h>
+#include <cstring>
 
 #if defined(_WIN64) && !defined(__CYGWIN__)
 #include <windows.h>
@@ -11,6 +11,176 @@
 #endif
 
 #include "util.h"
+
+
+typedef struct {
+        uint32_t h[4];
+        uint64_t length;
+        uint8_t buffer[64];
+        size_t buffer_len;
+} md5_ctx;
+
+static const uint32_t md5_init_state[4] = {
+        0x67452301U, 0xefcdab89U, 0x98badcfeU, 0x10325476U
+};
+
+static inline uint32_t md5_leftrotate(uint32_t x, uint32_t c) {
+        return (x << c) | (x >> (32 - c));
+}
+
+static void md5_transform(md5_ctx *ctx, const uint8_t block[64]) {
+        uint32_t a = ctx->h[0];
+        uint32_t b = ctx->h[1];
+        uint32_t c = ctx->h[2];
+        uint32_t d = ctx->h[3];
+        uint32_t w[16];
+
+        for (int i = 0; i < 16; i++) {
+                w[i] = (uint32_t)block[i * 4] |
+                       ((uint32_t)block[i * 4 + 1] << 8) |
+                       ((uint32_t)block[i * 4 + 2] << 16) |
+                       ((uint32_t)block[i * 4 + 3] << 24);
+        }
+
+        const uint32_t k[] = {
+                0xd76aa478U, 0xe8c7b756U, 0x242070dbU, 0xc1bdceeeU,
+                0xf57c0fafU, 0x4787c62aU, 0xa8304613U, 0xfd469501U,
+                0x698098d8U, 0x8b44f7afU, 0xffff5bb1U, 0x895cd7beU,
+                0x6b901122U, 0xfd987193U, 0xa679438eU, 0x49b40821U,
+                0xf61e2562U, 0xc040b340U, 0x265e5a51U, 0xe9b6c7aaU,
+                0xd62f105dU, 0x02441453U, 0xd8a1e681U, 0xe7d3fbc8U,
+                0x21e1cde6U, 0xc33707d6U, 0xf4d50d87U, 0x455a14edU,
+                0xa9e3e905U, 0xfcefa3f8U, 0x676f02d9U, 0x8d2a4c8aU,
+                0xfffa3942U, 0x8771f681U, 0x6d9d6122U, 0xfde5380cU,
+                0xa4beea44U, 0x4bdecfa9U, 0xf6bb4b60U, 0xbebfbc70U,
+                0x289b7ec6U, 0xeaa127faU, 0xd4ef3085U, 0x04881d05U,
+                0xd9d4d039U, 0xe6db99e5U, 0x1fa27cf8U, 0xc4ac5665U,
+                0xf4292244U, 0x432aff97U, 0xab9423a7U, 0xfc93a039U,
+                0x655b59c3U, 0x8f0ccc92U, 0xffeff47dU, 0x85845dd1U,
+                0x6fa87e4fU, 0xfe2ce6e0U, 0xa3014314U, 0x4e0811a1U,
+                0xf7537e82U, 0xbd3af235U, 0x2ad7d2bbU, 0xeb86d391U
+        };
+
+        const uint32_t r[] = {
+                7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+                5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+                4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+                6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
+        };
+
+        for (uint32_t i = 0; i < 64; i++) {
+                uint32_t f, g;
+                if (i < 16) {
+                        f = (b & c) | (~b & d);
+                        g = i;
+                } else if (i < 32) {
+                        f = (d & b) | (~d & c);
+                        g = (5 * i + 1) % 16;
+                } else if (i < 48) {
+                        f = b ^ c ^ d;
+                        g = (3 * i + 5) % 16;
+                } else {
+                        f = c ^ (b | ~d);
+                        g = (7 * i) % 16;
+                }
+                uint32_t temp = d;
+                d = c;
+                c = b;
+                uint32_t sum = a + f + k[i] + w[g];
+                b = b + md5_leftrotate(sum, r[i]);
+                a = temp;
+        }
+
+        ctx->h[0] += a;
+        ctx->h[1] += b;
+        ctx->h[2] += c;
+        ctx->h[3] += d;
+}
+
+static void md5_init(md5_ctx *ctx) {
+        memcpy(ctx->h, md5_init_state, sizeof(md5_init_state));
+        ctx->length = 0;
+        ctx->buffer_len = 0;
+}
+
+static void md5_update(md5_ctx *ctx, const uint8_t *data, size_t len) {
+        ctx->length += (uint64_t)len * 8;
+        size_t offset = 0;
+        if (ctx->buffer_len) {
+                size_t to_copy = 64 - ctx->buffer_len;
+                if (to_copy > len) {
+                        to_copy = len;
+                }
+                memcpy(ctx->buffer + ctx->buffer_len, data, to_copy);
+                ctx->buffer_len += to_copy;
+                offset += to_copy;
+                if (ctx->buffer_len == 64) {
+                        md5_transform(ctx, ctx->buffer);
+                        ctx->buffer_len = 0;
+                }
+        }
+        while (offset + 64 <= len) {
+                md5_transform(ctx, data + offset);
+                offset += 64;
+        }
+        if (offset < len) {
+                ctx->buffer_len = len - offset;
+                memcpy(ctx->buffer, data + offset, ctx->buffer_len);
+        }
+}
+
+static void md5_final(md5_ctx *ctx, uint8_t digest[16]) {
+        uint8_t padding[64] = {0x80};
+        uint8_t length_bytes[8];
+        for (int i = 0; i < 8; i++) {
+                length_bytes[i] = (uint8_t)((ctx->length >> (8 * i)) & 0xff);
+        }
+        size_t padding_len = (ctx->buffer_len < 56) ? (56 - ctx->buffer_len) : (120 - ctx->buffer_len);
+        md5_update(ctx, padding, padding_len);
+        md5_update(ctx, length_bytes, 8);
+        for (int i = 0; i < 4; i++) {
+                digest[i * 4] = (uint8_t)(ctx->h[i] & 0xff);
+                digest[i * 4 + 1] = (uint8_t)((ctx->h[i] >> 8) & 0xff);
+                digest[i * 4 + 2] = (uint8_t)((ctx->h[i] >> 16) & 0xff);
+                digest[i * 4 + 3] = (uint8_t)((ctx->h[i] >> 24) & 0xff);
+        }
+}
+
+int md5_file(const char *path, uint8_t digest[16]) {
+        if (digest == NULL || path == NULL) {
+                return -1;
+        }
+        FILE *f = fopen(path, "rb");
+        if (!f) {
+                return -1;
+        }
+        md5_ctx ctx;
+        md5_init(&ctx);
+        uint8_t buffer[4096];
+        size_t read_bytes;
+        while ((read_bytes = fread(buffer, 1, sizeof(buffer), f)) > 0) {
+                md5_update(&ctx, buffer, read_bytes);
+        }
+        int error = ferror(f);
+        fclose(f);
+        if (error) {
+                return -1;
+        }
+        md5_final(&ctx, digest);
+        return 0;
+}
+
+void md5_to_hex(const uint8_t digest[16], char hex[33]) {
+        static const char hexdigits[] = "0123456789abcdef";
+        if (!digest || !hex) {
+                return;
+        }
+        for (int i = 0; i < 16; i++) {
+                hex[i * 2] = hexdigits[(digest[i] >> 4) & 0x0f];
+                hex[i * 2 + 1] = hexdigits[digest[i] & 0x0f];
+        }
+        hex[32] = '\0';
+}
 
 
 char *ltrim(char *str, const char *seps)	{
