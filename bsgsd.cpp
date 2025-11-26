@@ -1423,7 +1423,7 @@ int main(int argc, char **argv)	{
     // Setting address parameters
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = inet_addr(IP);
-    address.sin_port = htons(PORT);
+    address.sin_port = htons(port);
     // Binding socket to address
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
