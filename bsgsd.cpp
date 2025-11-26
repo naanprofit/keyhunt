@@ -32,6 +32,13 @@ email: albertobsd@gmail.com
 #include <pthread.h>
 #if defined(__linux__)
 #include <sys/random.h>
+#include <sys/sysinfo.h>
+#elif defined(_WIN64) && !defined(__CYGWIN__)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach/mach_host.h>
+#include <mach/mach_init.h>
+#include <mach/vm_statistics.h>
 #endif
 #include <random>
 #include <getopt.h>
@@ -39,7 +46,6 @@ email: albertobsd@gmail.com
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <fcntl.h>
-#include <sys/sysinfo.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -143,6 +149,7 @@ int load_bptable_cache(const char *cache_path, const uint8_t md5[16], uint64_t e
 int save_bptable_cache(const char *cache_path, const uint8_t md5[16], uint64_t entry_count);
 int read_md5_file(const char *path, uint8_t digest[16]);
 int write_md5_file(const char *path, const uint8_t digest[16]);
+uint64_t get_available_ram();
 
 char *publickeytohashrmd160(char *pkey,int length);
 void publickeytohashrmd160_dst(char *pkey,int length,char *dst);
@@ -464,6 +471,37 @@ uint64_t bloom_bytes_for_entries_error(uint64_t entries, long double error) {
         return bytes;
 }
 
+uint64_t get_available_ram(){
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        MEMORYSTATUSEX statex;
+        statex.dwLength = sizeof(statex);
+        if (GlobalMemoryStatusEx(&statex)) {
+                return statex.ullAvailPhys;
+        }
+        return 0;
+#elif defined(__APPLE__)
+        mach_port_t host_port = mach_host_self();
+        vm_size_t page_size = 0;
+        mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
+        vm_statistics64_data_t vm_stat;
+        if(host_page_size(host_port, &page_size) != KERN_SUCCESS){
+                page_size = (vm_size_t)sysconf(_SC_PAGESIZE);
+        }
+        if(host_statistics64(host_port, HOST_VM_INFO, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS){
+                return (uint64_t)vm_stat.free_count * (uint64_t)page_size;
+        }
+        return 0;
+#elif defined(__linux__)
+        struct sysinfo info;
+        if (sysinfo(&info) == 0) {
+                return (uint64_t)info.freeram * info.mem_unit;
+        }
+        return 0;
+#else
+        return 0;
+#endif
+}
+
 void bloom_entries_for_bytes(uint64_t bytes, uint64_t *entries, uint32_t *hashes) {
         uint64_t best_n = 0;
         uint32_t best_k = 0;
@@ -485,15 +523,12 @@ void bloom_entries_for_bytes(uint64_t bytes, uint64_t *entries, uint32_t *hashes
 }
 
 bool warn_if_insufficient_ram(uint64_t need_bytes) {
-        struct sysinfo info;
-        if (sysinfo(&info) == 0) {
-                uint64_t avail = (uint64_t)info.freeram * info.mem_unit;
-                if (need_bytes > avail) {
-                        fprintf(stderr,
-                                "[W] Bloom filter of %.2f MB exceeds available RAM %.2f MB, consider using --mapped.\n",
-                                (double)need_bytes/1048576.0, (double)avail/1048576.0);
-                        return false;
-                }
+        uint64_t avail = get_available_ram();
+        if (avail && need_bytes > avail) {
+                fprintf(stderr,
+                        "[W] Bloom filter of %.2f MB exceeds available RAM %.2f MB, consider using --mapped.\n",
+                        (double)need_bytes/1048576.0, (double)avail/1048576.0);
+                return false;
         }
         return true;
 }
