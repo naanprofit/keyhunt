@@ -30,8 +30,10 @@ email: albertobsd@gmail.com
 
 #include <unistd.h>
 #include <pthread.h>
+#if defined(__linux__)
 #include <sys/random.h>
-#include <linux/random.h>
+#endif
+#include <random>
 #include <getopt.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -648,8 +650,8 @@ int main(int argc, char **argv)	{
 	ZERO.SetInt32(0);
 	ONE.SetInt32(1);
 	BSGS_GROUP_SIZE.SetInt32(CPU_GRP_SIZE);
-	
 	unsigned long rseedvalue;
+#if defined(__linux__)
 	int bytes_read = getrandom(&rseedvalue, sizeof(unsigned long), GRND_NONBLOCK);
 	if(bytes_read > 0)	{
 		rseed(rseedvalue);
@@ -661,12 +663,17 @@ int main(int argc, char **argv)	{
 	else	{
 		/*
 			what year is??
-			WTF linux without RNG ? 
+			WTF linux without RNG ?
 		*/
 		fprintf(stderr,"[E] Error getrandom() ?\n");
 		exit(0);
 		rseed(clock() + time(NULL) + rand()*rand());
 	}
+#else
+	std::random_device rd;
+	rseedvalue = ((uint64_t)rd() << 32) ^ rd();
+	rseed(rseedvalue);
+#endif
 	
         port = PORT;
         IP = (char*)ip_default;
