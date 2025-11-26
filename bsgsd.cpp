@@ -28,6 +28,7 @@ email: albertobsd@gmail.com
 #include "hash/ripemd160.h"
 
 #include <unistd.h>
+#include <getopt.h>
 #include <pthread.h>
 #include <sys/random.h>
 #include <linux/random.h>
@@ -357,26 +358,48 @@ int main(int argc, char **argv)	{
         port = PORT;
         IP = (char*)ip_default;
 
-        for(int i = 1; i < argc; i++){
-                if(strcmp(argv[i],"--bsgs-block-count") == 0 && (i + 1) < argc){
-                        bsgs_ggsb.block_count = strtoull(argv[i+1], NULL, 10);
-                        bsgs_ggsb.enabled = bsgs_ggsb.block_count > 0;
-                        i++;
-                } else if(strcmp(argv[i],"--bsgs-block-size") == 0 && (i + 1) < argc){
-                        bsgs_ggsb.block_size = strtoull(argv[i+1], NULL, 10);
-                        bsgs_ggsb.enabled = bsgs_ggsb.block_size > 0;
-                        i++;
-                }
-        }
+        static struct option long_options[] = {
+                {"mapped", optional_argument, 0, 0},
+                {"mapped-size", required_argument, 0, 0},
+                {"mapped-chunks", required_argument, 0, 0},
+                {"bloom-file", required_argument, 0, 0},
+                {"load-bloom", no_argument, 0, 0},
+                {"ptable", required_argument, 0, 0},
+                {"ptable-size", required_argument, 0, 0},
+                {"load-ptable", no_argument, 0, 0},
+                {"bloom-bytes", required_argument, 0, 0},
+                {"create-mapped", optional_argument, 0, 0},
+                {"tmpdir", required_argument, 0, 0},
+                {"bsgs-block-count", required_argument, 0, 0},
+                {"bsgs-block-size", required_argument, 0, 0},
+                {"rmd-batch-size", required_argument, 0, 0},
+                {0, 0, 0, 0}
+        };
 
 
         printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
-        while ((c = getopt(argc, argv, "6hk:n:t:p:i:B:")) != -1) {
-		switch(c) {
-			case '6':
-				FLAGSKIPCHECKSUM = 1;
-				fprintf(stderr,"[W] Skipping checksums on files\n");
+        int option_index = 0;
+        while ((c = getopt_long(argc, argv, "6hk:n:t:p:i:B:", long_options, &option_index)) != -1) {
+                switch(c) {
+                        case 0:
+                                if(strcmp(long_options[option_index].name, "bsgs-block-count") == 0){
+                                        bsgs_ggsb.block_count = strtoull(optarg, NULL, 10);
+                                        bsgs_ggsb.enabled = bsgs_ggsb.block_count > 0;
+                                } else if(strcmp(long_options[option_index].name, "bsgs-block-size") == 0){
+                                        bsgs_ggsb.block_size = strtoull(optarg, NULL, 10);
+                                        bsgs_ggsb.enabled = bsgs_ggsb.block_size > 0;
+                                } else {
+                                        static bool warned_mapped = false;
+                                        if(!warned_mapped){
+                                                fprintf(stderr,"[W] Mapped bloom/bP options are not supported in bsgsd; ignoring.\n");
+                                                warned_mapped = true;
+                                        }
+                                }
+                        break;
+                        case '6':
+                                FLAGSKIPCHECKSUM = 1;
+                                fprintf(stderr,"[W] Skipping checksums on files\n");
 			break;
 			case 'h':
 				// Show help menu
