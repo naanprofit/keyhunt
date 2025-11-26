@@ -7299,13 +7299,17 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                                fprintf(stderr,"[E] --load-bloom specified but mapped bloom file '%s' does not exist\n",fname_chk);
                                return false;
                        }
-                       if(bloom_load_mmap(bloom_arg,mapname,chunks) == 1) {
-                               fprintf(stderr,"[E] bloom_load_mmap failed for '%s'\n",mapname);
-                               return false;
-                       }
-                       printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
-                       return true;
-               }
+                        if(bloom_load_mmap(bloom_arg,mapname,chunks) == 1) {
+                                fprintf(stderr,"[E] bloom_load_mmap failed for '%s'\n",mapname);
+                                return false;
+                        }
+                        if(!bloom_arg->bytes){
+                                fprintf(stderr,"[E] Mapped bloom file '%s' has zero length; regenerate it or remove --load-bloom\n",mapname);
+                                return false;
+                        }
+                        printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                        return true;
+                }
 
                if(!mapped_entries_override) {
                        char fname_chk[1024];
@@ -7316,15 +7320,18 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                        }
                        struct stat st;
                        if(stat(fname_chk,&st) == 0) {
-                               if(bloom_load_mmap(bloom_arg,mapname,chunks) == 1) {
-                                       fprintf(stderr,"[E] bloom_load_mmap failed for '%s'\n",mapname);
-                                       r = false;
-                               } else {
-                                       printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
-                               }
-                               return r;
-                       }
-               }
+                                if(bloom_load_mmap(bloom_arg,mapname,chunks) == 1) {
+                                        fprintf(stderr,"[E] bloom_load_mmap failed for '%s'\n",mapname);
+                                        r = false;
+                                } else if(!bloom_arg->bytes){
+                                        fprintf(stderr,"[E] Existing mapped bloom file '%s' is empty; delete it or rerun without --load-bloom\n",mapname);
+                                        r = false;
+                                } else {
+                                        printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                                }
+                                return r;
+                        }
+                }
 
                uint64_t total;
                if(mapped_entries_override && (!mapped_override_applied || items_bloom >= mapped_entries_override)) {
