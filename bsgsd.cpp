@@ -219,6 +219,9 @@ int FLAGLOADBLOOM = 0;
 
 const char *bptable_filename = NULL;
 uint64_t bptable_size_override = 0;
+int bptable_fd = -1;
+uint64_t bptable_bytes = 0;
+int FLAGBPTABLEMAPPED = 0;
 int FLAGLOADPTABLE = 0;
 
 int KFACTOR = 1;
@@ -238,6 +241,8 @@ int FLAGBPTABLECACHE_READY = 0;
 unsigned char bptable_md5[16];
 int FLAGBPTABLEMD5_READY = 0;
 char bptable_cache_target[1024];
+char bptable_tmpfile[4096];
+const char *tmpdir_path = NULL;
 extern struct bsgs_xvalue *bPtable;
 
 struct bptable_cache_file {
@@ -834,7 +839,7 @@ int main(int argc, char **argv)	{
                                                 mapped_error_override = powl(0.5L, (long double)k);
                                         }
                                 } else if(strcmp(long_options[option_index].name, "tmpdir") == 0) {
-                                        // ignored
+                                        tmpdir_path = optarg;
                                 } else if(strcmp(long_options[option_index].name, "bsgs-block-count") == 0){
                                         bsgs_ggsb.block_count = strtoull(optarg, NULL, 10);
                                         bsgs_ggsb.enabled = bsgs_ggsb.block_count > 0;
@@ -1268,8 +1273,9 @@ int main(int argc, char **argv)	{
                 bytes = (uint64_t)bsgs_m3 * (uint64_t) sizeof(struct bsgs_xvalue);
                 printf("[+] Allocating %.2f MB for %" PRIu64  " bP Points\n",(double)(bytes/1048576),bsgs_m3);
 
+                int use_mmap = FLAGMAPPED || bptable_filename != NULL || bptable_size_override != 0;
                 uint64_t total = get_total_ram();
-                if(total && bytes > total){
+                if(!use_mmap && total && bytes > total){
                         double need_mb = (double)bytes/1048576.0;
                         double need_gb = (double)bytes/1073741824.0;
                         double have_mb = (double)total/1048576.0;
@@ -1282,9 +1288,112 @@ int main(int argc, char **argv)	{
                         exit(EXIT_FAILURE);
                 }
 
-                bPtable = (struct bsgs_xvalue*) malloc(bytes);
-                checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
-                memset(bPtable,0,bytes);
+                if(use_mmap){
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                        bPtable = (struct bsgs_xvalue*) malloc(bytes);
+                        checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
+                        memset(bPtable,0,bytes);
+#else
+                        uint64_t map_bytes = bytes;
+                        if(bptable_size_override && bptable_size_override > map_bytes){
+                                map_bytes = bptable_size_override;
+                        }
+                        const char *fname = bptable_filename;
+                        if(fname){
+                                if(FLAGLOADPTABLE){
+                                        bptable_fd = open(fname,O_RDONLY);
+                                        if(bptable_fd < 0){
+                                                fprintf(stderr,"[E] Cannot open bP table file\n");
+                                                exit(EXIT_FAILURE);
+                                        }
+                                        struct stat st;
+                                        if(fstat(bptable_fd,&st) != 0){
+                                                fprintf(stderr,"[E] Cannot stat bP table file\n");
+                                                exit(EXIT_FAILURE);
+                                        }
+                                        map_bytes = st.st_size;
+                                        if(map_bytes < bytes){
+                                                fprintf(stderr,"[E] Existing bP table file too small\n");
+                                                exit(EXIT_FAILURE);
+                                        }
+                                        FLAGREADEDFILE3 = 1;
+                                }else{
+                                        bptable_fd = open(fname,O_RDWR | O_CREAT,0600);
+                                        if(bptable_fd < 0){
+                                                fprintf(stderr,"[E] Cannot create bP table file\n");
+                                                exit(EXIT_FAILURE);
+                                        }
+                                        if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                                                if(ftruncate(bptable_fd,map_bytes) != 0){
+                                                        fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                                        exit(EXIT_FAILURE);
+                                                }
+                                        }
+                                }
+                        }else{
+                                const char *tmp = tmpdir_path;
+                                if(!tmp || !*tmp) tmp = getenv("TMPDIR");
+                                if(!tmp || !*tmp) tmp = getenv("TEMP");
+                                if(!tmp || !*tmp) tmp = getenv("TMP");
+                                if(!tmp || !*tmp) tmp = "/tmp";
+                                snprintf(bptable_tmpfile,sizeof(bptable_tmpfile),"%s/bptableXXXXXX",tmp);
+                                bptable_fd = mkstemp(bptable_tmpfile);
+                                if(bptable_fd < 0){
+                                        fprintf(stderr,"[E] Cannot create bP table file\n");
+                                        exit(EXIT_FAILURE);
+                                }
+                                if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                                        if(ftruncate(bptable_fd,map_bytes) != 0){
+                                                fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                                exit(EXIT_FAILURE);
+                                        }
+                                }
+                        }
+                        int prot = FLAGLOADPTABLE ? PROT_READ : (PROT_READ|PROT_WRITE);
+                        void *map = mmap(NULL,map_bytes,prot,MAP_SHARED,bptable_fd,0);
+                        if(map == MAP_FAILED){
+                                fprintf(stderr,"[E] mmap failed for bP table\n");
+                                exit(EXIT_FAILURE);
+                        }
+                        bPtable = (struct bsgs_xvalue*)map;
+                        bptable_bytes = map_bytes;
+                        FLAGBPTABLEMAPPED = 1;
+#if defined(MADV_WILLNEED)
+                        madvise(bPtable, bptable_bytes, MADV_WILLNEED);
+#endif
+#if defined(MADV_SEQUENTIAL)
+                        madvise(bPtable, bptable_bytes, MADV_SEQUENTIAL);
+#endif
+                        if(!FLAGLOADPTABLE && bptable_bytes < (1ULL<<20)){
+                                memset(bPtable,0,bptable_bytes);
+                        }
+#endif
+                }else{
+                        bPtable = (struct bsgs_xvalue*) malloc(bytes);
+                        checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
+                        memset(bPtable,0,bytes);
+                }
+
+                if(FLAGLOADPTABLE && bptable_filename){
+                        if(md5_file(bptable_filename, bptable_md5) == 0){
+                                FLAGBPTABLEMD5_READY = 1;
+                                char md5_path[4096];
+                                snprintf(md5_path, sizeof(md5_path), "%s.md5", bptable_filename);
+                                uint8_t md5_disk[16];
+                                if(read_md5_file(md5_path, md5_disk) == 0){
+                                        if(memcmp(md5_disk, bptable_md5, 16) == 0){
+                                                printf("[+] bP table MD5 verified (%s)\n", md5_path);
+                                        }else{
+                                                printf("[W] bP table MD5 mismatch (%s); refreshing\n", md5_path);
+                                        }
+                                }
+                                if(write_md5_file(md5_path, bptable_md5) != 0){
+                                        fprintf(stderr,"[W] Unable to write bP table MD5 file %s\n", md5_path);
+                                }
+                        }else{
+                                fprintf(stderr,"[W] Unable to compute MD5 for bP table %s\n", bptable_filename);
+                        }
+                }
 		
 		if(FLAGSAVEREADFILE)	{
 			/*Reading file for 1st bloom filter */
@@ -1445,8 +1554,9 @@ int main(int argc, char **argv)	{
 				FLAGREADEDFILE2 = 0;
 			}
 			
-			/*Reading file for bPtable */
-			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_2_%" PRIu64 ".tbl",bsgs_m3);
+                        if(!FLAGBPTABLEMAPPED && !FLAGLOADPTABLE){
+                        /*Reading file for bPtable */
+                        snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_2_%" PRIu64 ".tbl",bsgs_m3);
 			snprintf(bptable_cache_target,sizeof(bptable_cache_target),"%s",buffer_bloom_file);
 			fd_aux3 = fopen(buffer_bloom_file,"rb");
 			if(fd_aux3 != NULL)	{
@@ -1489,6 +1599,7 @@ int main(int argc, char **argv)	{
 			}
 			else	{
 				FLAGREADEDFILE3 = 0;
+			}
 			}
 			
 			/*Reading file for 3rd bloom filter */
@@ -3021,7 +3132,18 @@ void menu() {
 	printf("-p port     TCP port Number for listening conections\n");
 	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
 	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
- printf("--ptable-cache   Enable cached lookup metadata for the bP table when using --load-ptable\n");
+	printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
+	printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
+	printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
+	printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
+	printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
+	printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
+	printf("--load-bloom       Require existing mapped bloom file; do not create a new one\n");
+	printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
+	printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
+	printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
+	printf("--ptable-cache   Enable cached lookup metadata for the mapped bP table when using --load-ptable\n");
+	printf("--tmpdir dir     Directory for temporary files\n");
 	printf("-i ip		IP Address for listening conections\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
