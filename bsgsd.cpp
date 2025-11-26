@@ -722,8 +722,55 @@ int main(int argc, char **argv)	{
 		}
 	}
 
-	
 
+
+
+        if (FLAGLOADPTABLE && !bptable_filename) {
+                fprintf(stderr, "--load-ptable requires --ptable <file>\n");
+                exit(EXIT_FAILURE);
+        }
+
+        if (FLAGCREATEMAPPED) {
+                if (!mapped_entries_override) {
+                        fprintf(stderr, "[E] --create-mapped requires size via argument or --bloom-bytes\n");
+                        exit(EXIT_FAILURE);
+                }
+                const char *mapname = mapped_filename ? mapped_filename : "bloom.dat";
+                uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
+                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
+                uint64_t need_bytes = bloom_bytes_for_entries_error(mapped_entries_override, error);
+                struct bloom tmp;
+                if (bloom_init_mmap(&tmp, mapped_entries_override, error, mapname, 1, chunks) == 1) {
+                        fprintf(stderr, "[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",
+                                mapname, need_bytes, mapped_entries_override);
+                        exit(EXIT_FAILURE);
+                }
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                if (tmp.mapped_chunks > 1 && tmp.bf_chunks) {
+                        for (uint32_t i = 0; i < tmp.mapped_chunks; i++) {
+                                uint64_t cbytes = (i == tmp.mapped_chunks - 1) ? tmp.last_chunk_bytes : tmp.chunk_bytes;
+                                memset(tmp.bf_chunks[i], 0, cbytes);
+                                FlushViewOfFile(tmp.bf_chunks[i], cbytes);
+                        }
+                } else {
+                        memset(tmp.bf, 0, tmp.bytes);
+                        FlushViewOfFile(tmp.bf, tmp.bytes);
+                }
+#else
+                if (tmp.mapped_chunks > 1 && tmp.bf_chunks) {
+                        for (uint32_t i = 0; i < tmp.mapped_chunks; i++) {
+                                uint64_t cbytes = (i == tmp.mapped_chunks - 1) ? tmp.last_chunk_bytes : tmp.chunk_bytes;
+                                memset(tmp.bf_chunks[i], 0, cbytes);
+                                msync(tmp.bf_chunks[i], cbytes, MS_SYNC);
+                        }
+                } else {
+                        memset(tmp.bf, 0, tmp.bytes);
+                        msync(tmp.bf, tmp.bytes, MS_SYNC);
+                }
+#endif
+                bloom_unmap(&tmp);
+                return 0;
+        }
 
         uint64_t nk_n = 0x100000000000ULL;
         if(FLAG_N) {
@@ -1730,15 +1777,21 @@ int main(int argc, char **argv)	{
 		printf("[+] Accepting incoming conection from %s:%i\n",clientIP,clientPort);
 		fflush(stdout);
 		// Creating new thread to handle client
-		if (pthread_create(&tid, NULL, client_handler, &client_fd) != 0) {
+		int *client_fd_ptr = (int*) malloc(sizeof(int));
+		if (!client_fd_ptr) {
+			perror("malloc failed");
+			close(client_fd);
+			continue;
+		}
+		*client_fd_ptr = client_fd;
+		if (pthread_create(&tid, NULL, client_handler, client_fd_ptr) != 0) {
 			perror("pthread_create failed");
 			printf("Failed to attend to one client\n");
+			free(client_fd_ptr);
+			close(client_fd);
 		}
 		else	{
-			if (pthread_join(tid, NULL) != 0) {
-				fprintf(stderr, "Failed to join thread.\n");
-				exit(EXIT_FAILURE);
-			}
+			pthread_detach(tid);
 		}
 		printf("[+] Closing conection from %s:%i\n",clientIP,clientPort);
 		fflush(stdout);
@@ -2766,7 +2819,9 @@ void init_generator()	{
 }
 
 void* client_handler(void* arg) {
-    int client_fd = *(int*)arg;
+    int *client_ptr = (int*)arg;
+    int client_fd = *client_ptr;
+    free(client_ptr);
     char buffer[1024];
 	char *hextemp;
 	int bytes_received;
