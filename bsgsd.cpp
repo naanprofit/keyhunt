@@ -77,7 +77,7 @@ struct bPload	{
 
 	
 const char *version = "0.2.230519 Satoshi Quest";
-const char *ip_default = "127.0.0.1";
+const char *ip_default = "0.0.0.0";
 
 char *IP;
 int port;
@@ -1422,7 +1422,12 @@ int main(int argc, char **argv)	{
 
     // Setting address parameters
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = inet_addr(IP);
+    if(strcmp(IP,"0.0.0.0") == 0){
+        address.sin_addr.s_addr = INADDR_ANY;
+    } else if(inet_pton(AF_INET, IP, &address.sin_addr) != 1){
+        fprintf(stderr,"[E] Invalid IP address: %s\n", IP);
+        exit(EXIT_FAILURE);
+    }
     address.sin_port = htons(port);
     // Binding socket to address
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
