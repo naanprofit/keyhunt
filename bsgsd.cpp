@@ -311,7 +311,7 @@ int main(int argc, char **argv)	{
 
 	// 32-bit integers
 	uint32_t finished;
-	int readed, c, salir,i,s;
+        int readed, c, salir,i,s,index_value;
 
 	// Custom integers
 	Int total, pretotal, debugcount_mpz, seconds, div_pretotal, int_aux, int_r, int_q, int58;
@@ -1890,8 +1890,7 @@ pn.y.ModAdd(&GSn[i].y);
 						r = bsgs_secondcheck(&base_key,((j*CPU_GRP_SIZE) + i),&keyfound);
 						if(r)	{
 							hextemp = keyfound.GetBase16();
-							printf("[+] Thread Key found privkey %s   
-",hextemp);
+                                                        printf("[+] Thread Key found privkey %s\n",hextemp);
 							point_found = secp->ComputePublicKey(&keyfound);
 							aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed,point_found);
 							printf("[+] Publickey %s\n",aux_c);
