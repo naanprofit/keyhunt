@@ -31,6 +31,7 @@ email: albertobsd@gmail.com
 #include <pthread.h>
 #include <sys/random.h>
 #include <linux/random.h>
+#include <getopt.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -121,6 +122,11 @@ void calcualteindex(int i,Int *key);
 void *thread_process_bsgs(void *vargp);
 void *thread_bPload(void *vargp);
 void *thread_bPload_2blooms(void *vargp);
+void build_bptable_cache(uint64_t entry_count);
+int load_bptable_cache(const char *cache_path, const uint8_t md5[16], uint64_t entry_count);
+int save_bptable_cache(const char *cache_path, const uint8_t md5[16], uint64_t entry_count);
+int read_md5_file(const char *path, uint8_t digest[16]);
+int write_md5_file(const char *path, const uint8_t digest[16]);
 
 char *publickeytohashrmd160(char *pkey,int length);
 void publickeytohashrmd160_dst(char *pkey,int length,char *dst);
@@ -189,6 +195,123 @@ int FLAGREADEDFILE2 = 0;
 int FLAGREADEDFILE3 = 0;
 int FLAGREADEDFILE4 = 0;
 int FLAGUPDATEFILE1 = 0;
+
+int FLAGPTABLECACHE = 0;
+uint64_t bptable_cache_boundaries[257];
+int FLAGBPTABLECACHE_READY = 0;
+unsigned char bptable_md5[16];
+int FLAGBPTABLEMD5_READY = 0;
+char bptable_cache_target[1024];
+extern struct bsgs_xvalue *bPtable;
+
+struct bptable_cache_file {
+        uint32_t magic;
+        uint32_t version;
+        uint64_t entries;
+        uint8_t md5[16];
+        uint64_t boundaries[257];
+};
+
+int read_md5_file(const char *path, uint8_t digest[16]) {
+        if(!path || !digest){
+                return -1;
+        }
+        FILE *f = fopen(path, "r");
+        if(!f){
+                return -1;
+        }
+        char buffer[64] = {0};
+        size_t len = fread(buffer, 1, sizeof(buffer) - 1, f);
+        fclose(f);
+        buffer[len] = 0;
+        char *newline = strchr(buffer, '\n');
+        if(newline){
+                *newline = 0;
+        }
+        if(strlen(buffer) < 32){
+                return -1;
+        }
+        char hexbuf[33];
+        memcpy(hexbuf, buffer, 32);
+        hexbuf[32] = 0;
+        int result = hexs2bin(hexbuf, digest);
+        return (result == 16) ? 0 : -1;
+}
+
+int write_md5_file(const char *path, const uint8_t digest[16]) {
+        if(!path || !digest){
+                return -1;
+        }
+        char hex[33];
+        md5_to_hex(digest, hex);
+        FILE *f = fopen(path, "w");
+        if(!f){
+                return -1;
+        }
+        int wrote = fprintf(f, "%s\n", hex);
+        fclose(f);
+        return (wrote > 0) ? 0 : -1;
+}
+
+void build_bptable_cache(uint64_t entry_count) {
+        memset(bptable_cache_boundaries, 0, sizeof(bptable_cache_boundaries));
+        uint64_t pos = 0;
+        for(int bucket = 0; bucket < 256; bucket++){
+                while(pos < entry_count && bPtable[pos].value[0] < bucket){
+                        pos++;
+                }
+                bptable_cache_boundaries[bucket] = pos;
+        }
+        bptable_cache_boundaries[256] = entry_count;
+        FLAGBPTABLECACHE_READY = 1;
+}
+
+int load_bptable_cache(const char *cache_path, const uint8_t md5[16], uint64_t entry_count){
+        if(!cache_path || !md5){
+                        return 0;
+        }
+        FILE *f = fopen(cache_path, "rb");
+        if(!f){
+                return 0;
+        }
+        struct bptable_cache_file file_cache;
+        size_t r = fread(&file_cache, sizeof(file_cache), 1, f);
+        fclose(f);
+        if(r != 1){
+                return 0;
+        }
+        if(file_cache.magic != 0x42505443U || file_cache.version != 1){
+                return -1;
+        }
+        if(file_cache.entries != entry_count){
+                return -1;
+        }
+        if(memcmp(file_cache.md5, md5, 16) != 0){
+                return -1;
+        }
+        memcpy(bptable_cache_boundaries, file_cache.boundaries, sizeof(bptable_cache_boundaries));
+        FLAGBPTABLECACHE_READY = 1;
+        return 1;
+}
+
+int save_bptable_cache(const char *cache_path, const uint8_t md5[16], uint64_t entry_count){
+        if(!cache_path || !md5){
+                return -1;
+        }
+        struct bptable_cache_file file_cache;
+        file_cache.magic = 0x42505443U; // 'BPTC'
+        file_cache.version = 1;
+        file_cache.entries = entry_count;
+        memcpy(file_cache.md5, md5, 16);
+        memcpy(file_cache.boundaries, bptable_cache_boundaries, sizeof(bptable_cache_boundaries));
+        FILE *f = fopen(cache_path, "wb");
+        if(!f){
+                return -1;
+        }
+        size_t w = fwrite(&file_cache, sizeof(file_cache), 1, f);
+        fclose(f);
+        return (w == 1) ? 0 : -1;
+}
 
 
 int FLAGBITRANGE = 0;
@@ -320,7 +443,8 @@ int main(int argc, char **argv)	{
 	struct bPload *bPload_temp_ptr;
 
 	// Sizes
-	size_t rsize;
+        size_t rsize;
+        int index_value = 0;
 
 	
 	pthread_mutex_init(&write_keys,NULL);
@@ -357,6 +481,8 @@ int main(int argc, char **argv)	{
         port = PORT;
         IP = (char*)ip_default;
 
+        bptable_cache_target[0] = 0;
+
         for(int i = 1; i < argc; i++){
                 if(strcmp(argv[i],"--bsgs-block-count") == 0 && (i + 1) < argc){
                         bsgs_ggsb.block_count = strtoull(argv[i+1], NULL, 10);
@@ -372,10 +498,21 @@ int main(int argc, char **argv)	{
 
         printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
-        while ((c = getopt(argc, argv, "6hk:n:t:p:i:B:")) != -1) {
-		switch(c) {
-			case '6':
-				FLAGSKIPCHECKSUM = 1;
+        int option_index = 0;
+        static struct option long_options[] = {
+                {"ptable-cache", no_argument, 0, 0},
+                {0,0,0,0}
+        };
+        while ((c = getopt_long(argc, argv, "6hk:n:t:p:i:B:", long_options, &option_index)) != -1) {
+                if(c == 0){
+                        if(strcmp(long_options[option_index].name, "ptable-cache") == 0){
+                                FLAGPTABLECACHE = 1;
+                        }
+                        continue;
+                }
+                switch(c) {
+                        case '6':
+                                FLAGSKIPCHECKSUM = 1;
 				fprintf(stderr,"[W] Skipping checksums on files\n");
 			break;
 			case 'h':
@@ -921,6 +1058,7 @@ int main(int argc, char **argv)	{
 			
 			/*Reading file for bPtable */
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_2_%" PRIu64 ".tbl",bsgs_m3);
+			snprintf(bptable_cache_target,sizeof(bptable_cache_target),"%s",buffer_bloom_file);
 			fd_aux3 = fopen(buffer_bloom_file,"rb");
 			if(fd_aux3 != NULL)	{
 				printf("[+] Reading bP Table from file %s .",buffer_bloom_file);
@@ -941,6 +1079,24 @@ int main(int argc, char **argv)	{
 				printf("... Done!\n");
 				fclose(fd_aux3);
 				FLAGREADEDFILE3 = 1;
+				if(md5_file(bptable_cache_target, bptable_md5) == 0){
+				        FLAGBPTABLEMD5_READY = 1;
+				        char md5_path[1024];
+				        snprintf(md5_path, sizeof(md5_path), "%s.md5", bptable_cache_target);
+				        uint8_t md5_disk[16];
+				        if(read_md5_file(md5_path, md5_disk) == 0){
+				                if(memcmp(md5_disk, bptable_md5, 16) == 0){
+				                        printf("[+] bP table MD5 verified (%s)\n", md5_path);
+				                }else{
+				                        printf("[W] bP table MD5 mismatch (%s); refreshing\n", md5_path);
+				                }
+				        }
+				        if(write_md5_file(md5_path, bptable_md5) != 0){
+				                fprintf(stderr,"[W] Unable to write bP table MD5 file %s\n", md5_path);
+				        }
+				}else{
+				        fprintf(stderr,"[W] Unable to compute MD5 for bP table %s\n", bptable_cache_target);
+				}
 			}
 			else	{
 				FLAGREADEDFILE3 = 0;
@@ -993,6 +1149,45 @@ int main(int argc, char **argv)	{
 			
 		}
 		
+		if(FLAGPTABLECACHE && bptable_cache_target[0]){
+			if(!FLAGBPTABLEMD5_READY){
+				if(md5_file(bptable_cache_target, bptable_md5) == 0){
+					FLAGBPTABLEMD5_READY = 1;
+					char md5_path[1024];
+					snprintf(md5_path, sizeof(md5_path), "%s.md5", bptable_cache_target);
+					if(write_md5_file(md5_path, bptable_md5) != 0){
+						fprintf(stderr,"[W] Unable to write bP table MD5 file %s\n", md5_path);
+					}
+				}else{
+					fprintf(stderr,"[W] Unable to compute MD5 for bP table %s\n", bptable_cache_target);
+				}
+			}
+			if(FLAGBPTABLEMD5_READY){
+				char cache_path[1024];
+				snprintf(cache_path, sizeof(cache_path), "%s.cache", bptable_cache_target);
+				int cache_status = load_bptable_cache(cache_path, bptable_md5, bsgs_m3);
+				if(cache_status == 1){
+					printf("[+] bP table cache hit (%s)\n", cache_path);
+				}else{
+					if(cache_status < 0){
+						printf("[W] bP table cache mismatch (%s); rebuilding\n", cache_path);
+					}else{
+						printf("[I] bP table cache not found (%s); creating\n", cache_path);
+					}
+					build_bptable_cache(bsgs_m3);
+					if(save_bptable_cache(cache_path, bptable_md5, bsgs_m3) == 0){
+						printf("[+] bP table cache refreshed (%s)\n", cache_path);
+					}else{
+						printf("[W] Unable to write bP table cache to %s\n", cache_path);
+					}
+				}
+			}else{
+				build_bptable_cache(bsgs_m3);
+			}
+		}else{
+			FLAGBPTABLECACHE_READY = 0;
+		}
+
 		if(!FLAGREADEDFILE1 || !FLAGREADEDFILE2 || !FLAGREADEDFILE3 || !FLAGREADEDFILE4)	{
 			if(FLAGREADEDFILE1 == 1)	{
 				/* 
@@ -1311,6 +1506,7 @@ int main(int argc, char **argv)	{
 			if(!FLAGREADEDFILE3)	{
 				/* Writing file for bPtable */
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_2_%" PRIu64 ".tbl",bsgs_m3);
+				snprintf(bptable_cache_target,sizeof(bptable_cache_target),"%s",buffer_bloom_file);
 				fd_aux3 = fopen(buffer_bloom_file,"wb");
 				if(fd_aux3 != NULL)	{
 					printf("[+] Writing bP Table to file %s .. ",buffer_bloom_file);
@@ -1326,7 +1522,18 @@ int main(int argc, char **argv)	{
 						exit(0);
 					}
 					printf("Done!\n");
-					fclose(fd_aux3);	
+					fclose(fd_aux3);
+				if(md5_file(bptable_cache_target, bptable_md5) == 0){
+					FLAGBPTABLEMD5_READY = 1;
+					char md5_path[1024];
+					snprintf(md5_path, sizeof(md5_path), "%s.md5", bptable_cache_target);
+					if(write_md5_file(md5_path, bptable_md5) != 0){
+						fprintf(stderr,"[W] Unable to write bP table MD5 file %s\n", md5_path);
+					}
+				}else{
+					fprintf(stderr,"[W] Unable to compute MD5 for bP table %s\n", bptable_cache_target);
+				}
+	
 				}
 				else	{
 					fprintf(stderr,"[E] Error can't create the file %s\n",buffer_bloom_file);
@@ -1625,15 +1832,24 @@ void bsgs_myheapsort(struct bsgs_xvalue	*arr, int64_t n)	{
 }
 
 int bsgs_searchbinary(struct bsgs_xvalue *buffer,char *data,int64_t array_length,uint64_t *r_value) {
-	int64_t min,max,half,current;
-	int r = 0,rcmp;
-	min = 0;
-	current = 0;
-	max = array_length;
-	half = array_length;
-	while(!r && half >= 1) {
-		half = (max - min)/2;
-		rcmp = memcmp(data+16,buffer[current+half].value,BSGS_XVALUE_RAM);
+        int64_t min,max,half,current;
+        int r = 0,rcmp;
+        min = 0;
+        current = 0;
+        max = array_length;
+        if(FLAGBPTABLECACHE_READY){
+                uint8_t bucket = (uint8_t)data[16];
+                min = (int64_t)bptable_cache_boundaries[bucket];
+                max = (int64_t)bptable_cache_boundaries[bucket + 1];
+                current = min;
+                if(max <= min){
+                        return 0;
+                }
+        }
+        half = max - min;
+        while(!r && half >= 1) {
+                half = (max - min)/2;
+                rcmp = memcmp(data+16,buffer[current+half].value,BSGS_XVALUE_RAM);
 		if(rcmp == 0)	{
 			*r_value = buffer[current+half].index;
 			r = 1;
@@ -1889,9 +2105,8 @@ pn.y.ModAdd(&GSn[i].y);
 
 						r = bsgs_secondcheck(&base_key,((j*CPU_GRP_SIZE) + i),&keyfound);
 						if(r)	{
-							hextemp = keyfound.GetBase16();
-							printf("[+] Thread Key found privkey %s   
-",hextemp);
+                                                        hextemp = keyfound.GetBase16();
+                                                        printf("[+] Thread Key found privkey %s\n",hextemp);
 							point_found = secp->ComputePublicKey(&keyfound);
 							aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed,point_found);
 							printf("[+] Publickey %s\n",aux_c);
@@ -2406,6 +2621,7 @@ void menu() {
 	printf("-p port     TCP port Number for listening conections\n");
 	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
 	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
+ printf("--ptable-cache   Enable cached lookup metadata for the bP table when using --load-ptable\n");
 	printf("-i ip		IP Address for listening conections\n");
         printf("\nValid n and maximum k values:\n");
         print_nk_table();
