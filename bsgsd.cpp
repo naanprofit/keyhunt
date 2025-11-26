@@ -1323,12 +1323,19 @@ int main(int argc, char **argv)	{
                                                 fprintf(stderr,"[E] Cannot create bP table file\n");
                                                 exit(EXIT_FAILURE);
                                         }
+#if defined(__linux__)
                                         if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
                                                 if(ftruncate(bptable_fd,map_bytes) != 0){
                                                         fprintf(stderr,"[E] Cannot resize bP table file\n");
                                                         exit(EXIT_FAILURE);
                                                 }
                                         }
+#else
+                                        if(ftruncate(bptable_fd,map_bytes) != 0){
+                                                fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                                exit(EXIT_FAILURE);
+                                        }
+#endif
                                 }
                         }else{
                                 const char *tmp = tmpdir_path;
@@ -1342,12 +1349,19 @@ int main(int argc, char **argv)	{
                                         fprintf(stderr,"[E] Cannot create bP table file\n");
                                         exit(EXIT_FAILURE);
                                 }
+#if defined(__linux__)
                                 if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
                                         if(ftruncate(bptable_fd,map_bytes) != 0){
                                                 fprintf(stderr,"[E] Cannot resize bP table file\n");
                                                 exit(EXIT_FAILURE);
                                         }
                                 }
+#else
+                                if(ftruncate(bptable_fd,map_bytes) != 0){
+                                        fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                        exit(EXIT_FAILURE);
+                                }
+#endif
                         }
                         int prot = FLAGLOADPTABLE ? PROT_READ : (PROT_READ|PROT_WRITE);
                         void *map = mmap(NULL,map_bytes,prot,MAP_SHARED,bptable_fd,0);
@@ -1712,7 +1726,7 @@ int main(int argc, char **argv)	{
 					THREADCYCLES++;
 				}
 				
-				printf("\r[+] processing %lu/%lu bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
+                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
 				fflush(stdout);
 				
 				tid = (pthread_t *) calloc(NTHREADS,sizeof(pthread_t));
@@ -1758,7 +1772,7 @@ int main(int argc, char **argv)	{
 					}
 
 					if(OLDFINISHED_ITEMS != FINISHED_ITEMS)	{
-						printf("\r[+] processing %lu/%lu bP points : %i%%\r",FINISHED_ITEMS,bsgs_m2,(int) (((double)FINISHED_ITEMS/(double)bsgs_m2)*100));
+                                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m2,(int) (((double)FINISHED_ITEMS/(double)bsgs_m2)*100));
 						fflush(stdout);
 						OLDFINISHED_ITEMS = FINISHED_ITEMS;
 					}
@@ -1777,7 +1791,7 @@ int main(int argc, char **argv)	{
 					}
 					
 				}while(FINISHED_THREADS_COUNTER < THREADCYCLES);
-				printf("\r[+] processing %lu/%lu bP points : 100%%     \n",bsgs_m2,bsgs_m2);
+                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : 100%%     \n",bsgs_m2,bsgs_m2);
 				
 				free(tid);
 				free(bPload_mutex);
@@ -1806,7 +1820,7 @@ int main(int argc, char **argv)	{
 					THREADCYCLES++;
 				}
 				
-				printf("\r[+] processing %lu/%lu bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
+                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
 				fflush(stdout);
 				
 				tid = (pthread_t *) calloc(NTHREADS,sizeof(pthread_t));
@@ -1855,7 +1869,7 @@ int main(int argc, char **argv)	{
 						}
 					}
 					if(OLDFINISHED_ITEMS != FINISHED_ITEMS)	{
-						printf("\r[+] processing %lu/%lu bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
+                                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
 						fflush(stdout);
 						OLDFINISHED_ITEMS = FINISHED_ITEMS;
 					}
@@ -1874,7 +1888,7 @@ int main(int argc, char **argv)	{
 					}
 					
 				}while(FINISHED_THREADS_COUNTER < THREADCYCLES);
-				printf("\r[+] processing %lu/%lu bP points : 100%%     \n",bsgs_m,bsgs_m);
+                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : 100%%     \n",bsgs_m,bsgs_m);
 				
 				free(tid);
 				free(bPload_mutex);
@@ -1913,7 +1927,7 @@ int main(int argc, char **argv)	{
 			fflush(stdout);
 		}	
 		if(!FLAGREADEDFILE3)	{
-			printf("[+] Sorting %lu elements... ",bsgs_m3);
+                        printf("[+] Sorting %" PRIu64 " elements... ",bsgs_m3);
 			fflush(stdout);
 			bsgs_sort(bPtable,bsgs_m3);
 			sha256((uint8_t*)bPtable, bytes,(uint8_t*) checksum);
