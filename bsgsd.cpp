@@ -1373,19 +1373,34 @@ int main(int argc, char **argv)	{
                         bptable_bytes = map_bytes;
                         FLAGBPTABLEMAPPED = 1;
 #if defined(MADV_WILLNEED)
-                        madvise(bPtable, bptable_bytes, MADV_WILLNEED);
+                        if(bptable_bytes){
+                                madvise(bPtable, bptable_bytes, MADV_WILLNEED);
+                        }
 #endif
 #if defined(MADV_SEQUENTIAL)
-                        madvise(bPtable, bptable_bytes, MADV_SEQUENTIAL);
+                        if(bptable_bytes){
+                                madvise(bPtable, bptable_bytes, MADV_SEQUENTIAL);
+                        }
 #endif
-                        if(!FLAGLOADPTABLE && bptable_bytes < (1ULL<<20)){
+                        if(!FLAGLOADPTABLE){
+#if defined(_WIN64) && !defined(__CYGWIN__)
                                 memset(bPtable,0,bptable_bytes);
+#else
+                                /* Newly created files are already zeroed; avoid an expensive memset on huge mappings. */
+                                if(bptable_bytes < (1ULL<<20)){
+                                        memset(bPtable,0,bptable_bytes);
+                                }
+#endif
                         }
 #endif
                 }else{
                         bPtable = (struct bsgs_xvalue*) malloc(bytes);
                         checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
                         memset(bPtable,0,bytes);
+                }
+
+                if(bptable_filename && bptable_filename[0]){
+                        snprintf(bptable_cache_target,sizeof(bptable_cache_target),"%s",bptable_filename);
                 }
 
                 if(FLAGLOADPTABLE && bptable_filename){
@@ -1409,7 +1424,7 @@ int main(int argc, char **argv)	{
                         }
                 }
 		
-		if(FLAGSAVEREADFILE)	{
+		if(FLAGSAVEREADFILE && !FLAGMAPPED)	{
 			/*Reading file for 1st bloom filter */
 
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_4_%" PRIu64 ".blm",bsgs_m);
@@ -1935,7 +1950,7 @@ int main(int argc, char **argv)	{
 			printf("Done!\n");
 			fflush(stdout);
 		}
-		if(FLAGSAVEREADFILE || FLAGUPDATEFILE1 )	{
+		if((FLAGSAVEREADFILE || FLAGUPDATEFILE1) && !FLAGMAPPED )	{
 			if(!FLAGREADEDFILE1 || FLAGUPDATEFILE1)	{
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_4_%" PRIu64 ".blm",bsgs_m);
 				
