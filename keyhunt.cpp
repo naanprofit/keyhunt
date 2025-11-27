@@ -73,13 +73,6 @@ static int portable_posix_fallocate(int fd, off_t offset, off_t len) {
 #define posix_fallocate portable_posix_fallocate
 #endif
 
-#ifdef __unix__
-#ifdef __CYGWIN__
-#else
-#include <linux/random.h>
-#endif
-#endif
-
 #define CRYPTO_NONE 0
 #define CRYPTO_BTC 1
 #define CRYPTO_ETH 2
@@ -2705,9 +2698,9 @@ int main(int argc, char **argv)	{
 			s = 0;
 			switch(FLAGBSGSMODE)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
-				case 0:
-					tid[j] = CreateThread(NULL, 0, thread_process_bsgs, (void*)tt, 0, &s);
-					break;
+                                case 0:
+                                        tid[j] = CreateThread(NULL, 0, thread_process_bsgs, (void*)tt, 0, &s);
+                                        break;
 				case 1:
 					tid[j] = CreateThread(NULL, 0, thread_process_bsgs_backward, (void*)tt, 0, &s);
 					break;
@@ -2717,28 +2710,36 @@ int main(int argc, char **argv)	{
 				case 3:
 					tid[j] = CreateThread(NULL, 0, thread_process_bsgs_random, (void*)tt, 0, &s);
 					break;
-				case 4:
-					tid[j] = CreateThread(NULL, 0, thread_process_bsgs_dance, (void*)tt, 0, &s);
-					break;
-				}
+                                case 4:
+                                        tid[j] = CreateThread(NULL, 0, thread_process_bsgs_dance, (void*)tt, 0, &s);
+                                        break;
+                                case 5:
+                                        /* GGSB currently reuses the sequential worker */
+                                        tid[j] = CreateThread(NULL, 0, thread_process_bsgs, (void*)tt, 0, &s);
+                                        break;
+                                }
 #else
-				case 0:
-					s = pthread_create(&tid[j],NULL,thread_process_bsgs,(void *)tt);
-				break;
+                                case 0:
+                                        s = pthread_create(&tid[j],NULL,thread_process_bsgs,(void *)tt);
+                                break;
 				case 1:
 					s = pthread_create(&tid[j],NULL,thread_process_bsgs_backward,(void *)tt);
 				break;
 				case 2:
 					s = pthread_create(&tid[j],NULL,thread_process_bsgs_both,(void *)tt);
 				break;
-				case 3:
-					s = pthread_create(&tid[j],NULL,thread_process_bsgs_random,(void *)tt);
-				break;
-				case 4:
-					s = pthread_create(&tid[j],NULL,thread_process_bsgs_dance,(void *)tt);
-				break;
+                                case 3:
+                                        s = pthread_create(&tid[j],NULL,thread_process_bsgs_random,(void *)tt);
+                                break;
+                                case 4:
+                                        s = pthread_create(&tid[j],NULL,thread_process_bsgs_dance,(void *)tt);
+                                break;
+                                case 5:
+                                        /* GGSB currently reuses the sequential worker */
+                                        s = pthread_create(&tid[j],NULL,thread_process_bsgs,(void *)tt);
+                                break;
 #endif
-			}
+                        }
 #if defined(_WIN64) && !defined(__CYGWIN__)
 			if (tid[j] == NULL) {
 #else

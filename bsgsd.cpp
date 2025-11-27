@@ -13,6 +13,8 @@ email: albertobsd@gmail.com
 #include <errno.h>
 #include <signal.h>
 #include <vector>
+#include <atomic>
+#include <chrono>
 #include <inttypes.h>
 #include "base58/libbase58.h"
 #include "rmd160/rmd160.h"
@@ -378,7 +380,7 @@ uint64_t BSGS_BUFFERREGISTERLENGTH = 36;
 /*
 BSGS Variables
 */
-int bsgs_found;
+std::atomic<bool> bsgs_found{false};
 Point OriginalPointsBSGS;
 bool OriginalPointsBSGScompressed;
 
@@ -2526,14 +2528,14 @@ void *thread_process_bsgs(void *vargp)	{
 			free(hextemp);
 			free(aux_c);
 			
-			bsgs_found = 1;
+			bsgs_found.store(true, std::memory_order_relaxed);
 		}
 		else	{
 
 			startP  = secp->AddDirect(OriginalPointsBSGS,point_aux);
 			
 			uint32_t j = 0;
-			while( j < cycles && bsgs_found == 0 )	{
+			while( j < cycles && !bsgs_found.load(std::memory_order_relaxed) )	{
 			
 				int i;
 				
@@ -2645,7 +2647,7 @@ pn.y.ModAdd(&GSn[i].y);
 					giant_bucket_positions[pos] = i;
 				}
 
-				for(int bucket = 0; bucket < 256 && bsgs_found == 0; bucket++) {
+				for(int bucket = 0; bucket < 256 && !bsgs_found.load(std::memory_order_relaxed); bucket++) {
 					uint32_t start = giant_bucket_offsets[bucket];
 					uint32_t end = giant_bucket_offsets[bucket + 1];
 
@@ -2655,7 +2657,7 @@ pn.y.ModAdd(&GSn[i].y);
 
 					struct bloom *primary = &bloom_bP[bucket];
 
-					for(uint32_t pos = start; pos < end && bsgs_found == 0; pos++) {
+					for(uint32_t pos = start; pos < end && !bsgs_found.load(std::memory_order_relaxed); pos++) {
 						int i = (int)giant_bucket_positions[pos];
 
 						if(!bloom_check(primary,(char*)giant_xpoints[i],BSGS_BUFFERXPOINTLENGTH)) {
@@ -2680,7 +2682,7 @@ pn.y.ModAdd(&GSn[i].y);
 							pthread_mutex_unlock(&write_keys);
 							free(hextemp);
 							free(aux_c);
-							bsgs_found = 1;
+							bsgs_found.store(true, std::memory_order_relaxed);
 
 						}
 					}
@@ -2708,7 +2710,7 @@ pn.y.ModAdd(&GSn[i].y);
 				j++;
 			} //while all the aMP points
 		} // end else
-	}while(base_key.IsLower(&n_range_end) && bsgs_found == 0);
+	}while(base_key.IsLower(&n_range_end) && !bsgs_found.load(std::memory_order_relaxed));
 	delete grp;
 	pthread_exit(NULL);
 }
@@ -3258,8 +3260,10 @@ void* client_handler(void* arg) {
         Tokenizer t;
         t.tokens = NULL;
 
+        auto search_start = std::chrono::steady_clock::now();
+
         /* Reset per-request state */
-        bsgs_found = 0;
+        bsgs_found.store(false, std::memory_order_relaxed);
         BSGSkeyfound.SetInt32(0);
 
 #ifdef SO_NOSIGPIPE
@@ -3462,23 +3466,26 @@ void* client_handler(void* arg) {
 
 	}
 
-	// Wait for threads to finish
-	for (i = 0; i < NTHREADS; i++) {
-		if(threads_created[i]){
-			rc = pthread_join(threads[i], NULL);
+        // Wait for threads to finish
+        for (i = 0; i < NTHREADS; i++) {
+                if(threads_created[i]){
+                        rc = pthread_join(threads[i], NULL);
 			if (rc != 0) {
 				printf("Failed to join thread %d\n", i);
 			}
 		}
-	}
-	
-	free(threads_created);
-	free(threads);
-	free(thread_args);
-	if(http_mode) {
-		std::string body;
-		const char *status_line;
-		if(bsgs_found)	{
+        }
+
+        free(threads_created);
+        free(threads);
+        free(thread_args);
+
+        auto search_end = std::chrono::steady_clock::now();
+        double elapsed_seconds = std::chrono::duration<double>(search_end - search_start).count();
+        if(http_mode) {
+                std::string body;
+                const char *status_line;
+		if(bsgs_found.load(std::memory_order_relaxed))	{
 			hextemp = BSGSkeyfound.GetBase16();
 			body.assign(hextemp);
 			body.push_back('\n');
@@ -3489,8 +3496,8 @@ void* client_handler(void* arg) {
 			body = "404 Not Found\n";
 			status_line = "HTTP/1.1 404 Not Found\r\n";
 		}
-		char header[128];
-		int hlen = snprintf(header,sizeof(header),"%sContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",status_line,body.size());
+                char header[256];
+                int hlen = snprintf(header,sizeof(header),"%sContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\nX-Elapsed-Seconds: %.3f\r\n\r\n",status_line,body.size(),elapsed_seconds);
 		std::string response(header, hlen);
 		response += body;
 		if(!safe_send(client_fd, response.c_str(), response.size())) {
@@ -3498,7 +3505,7 @@ void* client_handler(void* arg) {
 		}
 	} else {
 		int message_len;
-		if(bsgs_found)  {
+		if(bsgs_found.load(std::memory_order_relaxed))  {
 			hextemp = BSGSkeyfound.GetBase16();
 			message_len = snprintf(buffer, sizeof(buffer), "%s\n",hextemp);
 			free(hextemp);
@@ -3511,7 +3518,7 @@ void* client_handler(void* arg) {
 			printf("Failed to send message to client\n");
 		}
 	}
-	bsgs_found = 0;
+	bsgs_found.store(false, std::memory_order_relaxed);
 
 	close(client_fd);
 	pthread_exit(NULL);
