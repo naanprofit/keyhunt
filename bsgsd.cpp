@@ -3253,53 +3253,146 @@ void* client_handler(void* arg) {
 	Tokenizer t;
 	t.tokens = NULL;
 	
+	bool http_mode = false;
+	std::string pubkey_str;
+	std::string n_start_hex;
+	std::string n_end_hex;
+
 	// Peek at the incoming data to determine its length
 	bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, MSG_PEEK);
 	if (bytes_received <= 0) {
 		close(client_fd);
 		pthread_exit(NULL);
 	}
-	
-    
-	char* newline = (char*) memchr(buffer, '\n', bytes_received);
-	size_t line_length = newline ? (newline - buffer) + 1 : bytes_received;
-	bytes_received = recv(client_fd, buffer, line_length, 0);
-	if (bytes_received <= 0)	{
+
+	if(bytes_received >= 4 && strncmp(buffer,"POST",4) == 0) {
+		http_mode = true;
+	}
+
+	if(http_mode) {
+		std::string request;
+		request.reserve(1024);
+		ssize_t recvd;
+		size_t header_end_pos = std::string::npos;
+		size_t content_length = 0;
+		// Read headers
+		do {
+			recvd = recv(client_fd, buffer, sizeof(buffer), 0);
+			if(recvd <= 0) {
+				close(client_fd);
+				pthread_exit(NULL);
+			}
+			request.append(buffer, recvd);
+			header_end_pos = request.find("\r\n\r\n");
+			if(request.size() > (1024 * 1024)) {
+				// Too large
+				sendstr(client_fd,"HTTP/1.1 413 Request Entity Too Large\r\nConnection: close\r\n\r\n");
+				close(client_fd);
+				pthread_exit(NULL);
+			}
+		} while(header_end_pos == std::string::npos);
+
+		std::string header_block = request.substr(0, header_end_pos);
+		std::string body = request.substr(header_end_pos + 4);
+
+		// Find content-length
+		const std::string cl_hdr = "Content-Length:";
+		size_t cl_pos = header_block.find(cl_hdr);
+		if(cl_pos != std::string::npos) {
+			cl_pos += cl_hdr.size();
+			while(cl_pos < header_block.size() && (header_block[cl_pos] == ' ' || header_block[cl_pos] == '\t')) cl_pos++;
+			content_length = strtoull(header_block.c_str() + cl_pos, NULL, 10);
+		}
+
+		while(body.size() < content_length) {
+			recvd = recv(client_fd, buffer, sizeof(buffer), 0);
+			if(recvd <= 0) {
+				close(client_fd);
+				pthread_exit(NULL);
+			}
+			body.append(buffer, recvd);
+			if(body.size() > (1024 * 1024)) {
+				sendstr(client_fd,"HTTP/1.1 413 Request Entity Too Large\r\nConnection: close\r\n\r\n");
+				close(client_fd);
+				pthread_exit(NULL);
+			}
+		}
+
+		auto extract_json_value = [](const std::string &src,const char *key,std::string &out)->bool {
+			std::string needle = "\"" + std::string(key) + "\"";
+			size_t pos = src.find(needle);
+			if(pos == std::string::npos) return false;
+			pos = src.find(':', pos + needle.size());
+			if(pos == std::string::npos) return false;
+			pos = src.find('\"', pos);
+			if(pos == std::string::npos) return false;
+			size_t end = src.find('\"', pos + 1);
+			if(end == std::string::npos) return false;
+			out.assign(src.begin() + pos + 1, src.begin() + end);
+			return true;
+		};
+
+		if(!(extract_json_value(body,"pubkey",pubkey_str) && extract_json_value(body,"from",n_start_hex) && extract_json_value(body,"to",n_end_hex))) {
+			sendstr(client_fd,"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+			close(client_fd);
+			pthread_exit(NULL);
+		}
+	}
+	else {
+		char* newline = (char*) memchr(buffer, '\n', bytes_received);
+		size_t line_length = newline ? (newline - buffer) + 1 : bytes_received;
+		bytes_received = recv(client_fd, buffer, line_length, 0);
+		if (bytes_received <= 0)	{
+			close(client_fd);
+			pthread_exit(NULL);
+		}
+
+		// Process the received bytes here
+		buffer[bytes_received] = '\0';
+		stringtokenizer(buffer, &t);
+		if (t.n != 3) {
+			printf("Invalid input format from client, tokens %i : %s\n",t.n, buffer);
+			freetokenizer(&t);
+			sendstr(client_fd,"400 Bad Request");
+			close(client_fd);
+			pthread_exit(NULL);
+		}
+		pubkey_str.assign(t.tokens[0]);
+		n_start_hex.assign(t.tokens[1]);
+		n_end_hex.assign(t.tokens[2]);
+		freetokenizer(&t);
+	}
+
+	std::vector<char> pubkey_buf(pubkey_str.begin(), pubkey_str.end());
+	pubkey_buf.push_back('\0');
+	std::vector<char> n_start_buf(n_start_hex.begin(), n_start_hex.end());
+	n_start_buf.push_back('\0');
+	std::vector<char> n_end_buf(n_end_hex.begin(), n_end_hex.end());
+	n_end_buf.push_back('\0');
+
+	if(!secp->ParsePublicKeyHex(pubkey_buf.data(),OriginalPointsBSGS,OriginalPointsBSGScompressed))	{
+		printf("Invalid publickey format from client %s\n",pubkey_buf.data());
+		if(http_mode) {
+			sendstr(client_fd,"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+		} else {
+			sendstr(client_fd,"400 Bad Request");
+		}
+		close(client_fd);
+		pthread_exit(NULL);
+	}
+	if(!(isValidHex(n_start_buf.data()) && isValidHex(n_end_buf.data())))	{
+		printf("Invalid hexadecimal format from client %s:%s\n",n_start_buf.data(),n_end_buf.data());
+		if(http_mode) {
+			sendstr(client_fd,"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+		} else {
+			sendstr(client_fd,"400 Bad Request");
+		}
 		close(client_fd);
 		pthread_exit(NULL);
 	}
 
-	// Process the received bytes here
-	buffer[bytes_received] = '\0';
-	stringtokenizer(buffer, &t);
-	if (t.n != 3) {
-		printf("Invalid input format from client, tokens %i : %s\n",t.n, buffer);
-		freetokenizer(&t);
-		sendstr(client_fd,"400 Bad Request");
-		close(client_fd);
-		pthread_exit(NULL);
-	}
-
-	if(!secp->ParsePublicKeyHex(t.tokens[0],OriginalPointsBSGS,OriginalPointsBSGScompressed))	{
-		printf("Invalid publickey format from client %s\n",t.tokens[0]);
-		freetokenizer(&t);
-		sendstr(client_fd,"400 Bad Request");
-		close(client_fd);
-		pthread_exit(NULL);		
-	}
-	if(!(isValidHex(t.tokens[1]) && isValidHex(t.tokens[2])))	{
-		printf("Invalid hexadecimal format from client %s:%s\n",t.tokens[1],t.tokens[2]);
-		freetokenizer(&t);
-		sendstr(client_fd,"400 Bad Request");
-		close(client_fd);
-		pthread_exit(NULL);	
-	}
-	
-	n_range_start.SetBase16(t.tokens[1]);
-	n_range_end.SetBase16(t.tokens[2]);
-	
-	freetokenizer(&t);
-	
+	n_range_start.SetBase16(n_start_buf.data());
+	n_range_end.SetBase16(n_end_buf.data());
 	BSGS_CURRENT.Set(&n_range_start);
 	
 	bool *threads_created;
@@ -3342,25 +3435,48 @@ void* client_handler(void* arg) {
 	free(threads_created);
 	free(threads);
 	free(thread_args);
-	int message_len;
-	if(bsgs_found)	{
-		hextemp = BSGSkeyfound.GetBase16();
-		message_len = snprintf(buffer, sizeof(buffer), "%s\n",hextemp);
-		free(hextemp);
-	}
-	else	{
-		static const char *notfound_msg = "404 Not Found\n";
-		message_len = snprintf(buffer, sizeof(buffer), "%s", notfound_msg);
+	if(http_mode) {
+		std::string body;
+		const char *status_line;
+		if(bsgs_found)	{
+			hextemp = BSGSkeyfound.GetBase16();
+			body.assign(hextemp);
+			body.push_back('\n');
+			free(hextemp);
+			status_line = "HTTP/1.1 200 OK\r\n";
+		}
+		else	{
+			body = "404 Not Found\n";
+			status_line = "HTTP/1.1 404 Not Found\r\n";
+		}
+		char header[128];
+		int hlen = snprintf(header,sizeof(header),"%sContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",status_line,body.size());
+		std::string response(header, hlen);
+		response += body;
+		int bytes_sent = send(client_fd, response.c_str(), response.size(), 0);
+		if (bytes_sent == -1) {
+			printf("Failed to send message to client\n");
+		}
+	} else {
+		int message_len;
+		if(bsgs_found)	{
+			hextemp = BSGSkeyfound.GetBase16();
+			message_len = snprintf(buffer, sizeof(buffer), "%s\n",hextemp);
+			free(hextemp);
+		}
+		else	{
+			static const char *notfound_msg = "404 Not Found\n";
+			message_len = snprintf(buffer, sizeof(buffer), "%s", notfound_msg);
+		}
+		int bytes_sent = send(client_fd, buffer, message_len, 0);
+		if (bytes_sent == -1) {
+			printf("Failed to send message to client\n");
+		}
 	}
 	bsgs_found = 0;
-	int bytes_sent = send(client_fd, buffer, message_len, 0);
-	if (bytes_sent == -1) {
-		printf("Failed to send message to client\n");
-	}
 
-	
-    close(client_fd);
-    pthread_exit(NULL);
+	close(client_fd);
+	pthread_exit(NULL);
 }
 
 int sendstr(int client_fd,const char *str)	{
