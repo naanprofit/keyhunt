@@ -609,6 +609,7 @@ Int BSGS_M2;				//M2 is M/32
 Int BSGS_M2_double;			//M2_double is M2 * 2
 Int BSGS_M3;				//M3 is M2/32
 Int BSGS_M3_double;			//M3_double is M3 * 2
+Int BSGS_STEP;                          //Stride between base keys
 
 Int ONE;
 Int ZERO;
@@ -1570,11 +1571,11 @@ int main(int argc, char **argv)	{
 		}
 		
 		BSGS_M_double.SetInt32(2);
-		BSGS_M_double.Mult(&BSGS_M);
-		
-		
-		BSGS_M2_double.SetInt32(2);
-		BSGS_M2_double.Mult(&BSGS_M2);
+BSGS_M_double.Mult(&BSGS_M);
+
+
+BSGS_M2_double.SetInt32(2);
+BSGS_M2_double.Mult(&BSGS_M2);
 		
 		BSGS_R.Set(&BSGS_M2);
 		BSGS_R.Mod(&BSGS_AUX);
@@ -1605,15 +1606,16 @@ int main(int argc, char **argv)	{
 
 		bsgs_m = BSGS_M.GetInt64();
 		bsgs_aux = BSGS_AUX.GetInt64();
-		
-		
-		BSGS_N_double.SetInt32(2);
-		BSGS_N_double.Mult(&BSGS_N);
 
-		
-		hextemp = BSGS_N.GetBase16();
-		printf("[+] N = 0x%s\n",hextemp);
-		free(hextemp);
+
+BSGS_N_double.SetInt32(2);
+BSGS_N_double.Mult(&BSGS_N);
+BSGS_STEP.Set(&BSGS_N);
+
+
+hextemp = BSGS_N.GetBase16();
+printf("[+] N = 0x%s\n",hextemp);
+free(hextemp);
 		if(((uint64_t)(bsgs_m/256)) > 10000)	{
 			itemsbloom = (uint64_t)(bsgs_m / 256);
 			if(bsgs_m % 256 != 0 )	{
@@ -4575,7 +4577,7 @@ void *thread_process_bsgs(void *vargp)	{
 #endif
 
 		base_key.Set(&BSGS_CURRENT);	/* we need to set our base_key to the current BSGS_CURRENT value*/
-		BSGS_CURRENT.Add(&BSGS_N_double);		/*Then add 2*BSGS_N to BSGS_CURRENT*/
+		BSGS_CURRENT.Add(&BSGS_STEP);		/*Then add 2*BSGS_N to BSGS_CURRENT*/
 		/*
 		BSGS_CURRENT.Add(&BSGS_N);		//Then add BSGS_N to BSGS_CURRENT
 		BSGS_CURRENT.Add(&BSGS_N);		//Then add BSGS_N to BSGS_CURRENT
@@ -5589,7 +5591,7 @@ void *thread_process_bsgs_dance(void *vargp)	{
 					n_range_end.Sub(&BSGS_N);
 					n_range_end.Sub(&BSGS_N);
 				*/
-					n_range_end.Sub(&BSGS_N_double);
+					n_range_end.Sub(&BSGS_STEP);
 					if(n_range_end.IsLower(&BSGS_CURRENT))	{
 						base_key.Set(&BSGS_CURRENT);
 					}
@@ -5605,7 +5607,7 @@ void *thread_process_bsgs_dance(void *vargp)	{
 			if(BSGS_CURRENT.IsLower(&n_range_end))	{
 				base_key.Set(&BSGS_CURRENT);
 				//BSGS_N_double
-				BSGS_CURRENT.Add(&BSGS_N_double);
+				BSGS_CURRENT.Add(&BSGS_STEP);
 				/*
 				BSGS_CURRENT.Add(&BSGS_N);
 				BSGS_CURRENT.Add(&BSGS_N);
@@ -5870,7 +5872,7 @@ void *thread_process_bsgs_backward(void *vargp)	{
 		pthread_mutex_lock(&bsgs_thread);
 #endif
 		if(n_range_end.IsGreater(&n_range_start))	{
-			n_range_end.Sub(&BSGS_N_double);
+			n_range_end.Sub(&BSGS_STEP);
 			if(n_range_end.IsLower(&n_range_start))	{
 				base_key.Set(&n_range_start);
 			}
@@ -6133,7 +6135,7 @@ void *thread_process_bsgs_both(void *vargp)	{
 		switch(r)	{
 			case 0:	//TOP
 				if(n_range_end.IsGreater(&BSGS_CURRENT))	{
-						n_range_end.Sub(&BSGS_N_double);
+						n_range_end.Sub(&BSGS_STEP);
 						/*
 						n_range_end.Sub(&BSGS_N);
 						n_range_end.Sub(&BSGS_N);
@@ -6153,7 +6155,7 @@ void *thread_process_bsgs_both(void *vargp)	{
 				if(BSGS_CURRENT.IsLower(&n_range_end))	{
 					base_key.Set(&BSGS_CURRENT);
 					//BSGS_N_double
-					BSGS_CURRENT.Add(&BSGS_N_double);
+					BSGS_CURRENT.Add(&BSGS_STEP);
 					/*
 					BSGS_CURRENT.Add(&BSGS_N);
 					BSGS_CURRENT.Add(&BSGS_N);
