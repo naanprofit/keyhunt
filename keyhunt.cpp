@@ -1492,9 +1492,10 @@ int main(int argc, char **argv)	{
                         }
                         if (bsgs_ggsb.block_count > 1) {
                                 fprintf(stderr,
-                                        "[E] GGSB block partitioning is not available in this build; "
-                                        "use --bsgs-block-count 1 or omit the flag.\n");
-                                exit(EXIT_FAILURE);
+                                        "[W] GGSB block partitioning is not available in this build; "
+                                        "collapsing to a single block.\n");
+                                bsgs_ggsb.block_count = 1;
+                                bsgs_ggsb.block_size = m_val;
                         }
                 } else {
                         bsgs_ggsb.block_count = 0;
@@ -2911,12 +2912,13 @@ int main(int argc, char **argv)	{
                                                         str_total, str_seconds,
                                                         str_divpretotal, str_limits_prefixs[i],
                                                         str_pretotal);
-                                        } else if (THREADOUTPUT == 1) {
+                                        } else {
                                                 sprintf(buffer,
                                                         "\r[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\r",
                                                         str_total, str_seconds,
                                                         str_divpretotal, str_limits_prefixs[i],
                                                         str_pretotal);
+                                                THREADOUTPUT = 1;
                                         }
                                         free(str_divpretotal);
                                 }
