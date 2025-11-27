@@ -1484,15 +1484,21 @@ int main(int argc, char **argv)	{
 				} else if(bsgs_ggsb.block_size > 0 && bsgs_ggsb.block_count == 0){
 					bsgs_ggsb.block_count = (m_val + bsgs_ggsb.block_size - 1) / bsgs_ggsb.block_size;
 				}
-				if(bsgs_ggsb.block_count == 0){
-					bsgs_ggsb.block_count = 1;
-				}
-				if(bsgs_ggsb.block_size == 0){
-					bsgs_ggsb.block_size = m_val;
-				}
-			} else {
-				bsgs_ggsb.block_count = 0;
-				bsgs_ggsb.block_size = 0;
+                        if(bsgs_ggsb.block_count == 0){
+                                bsgs_ggsb.block_count = 1;
+                        }
+                        if(bsgs_ggsb.block_size == 0){
+                                bsgs_ggsb.block_size = m_val;
+                        }
+                        if (bsgs_ggsb.block_count > 1) {
+                                fprintf(stderr,
+                                        "[E] GGSB block partitioning is not available in this build; "
+                                        "use --bsgs-block-count 1 or omit the flag.\n");
+                                exit(EXIT_FAILURE);
+                        }
+                } else {
+                        bsgs_ggsb.block_count = 0;
+                        bsgs_ggsb.block_size = 0;
 			}
 		}
 		else	{
