@@ -1491,17 +1491,13 @@ int main(int argc, char **argv)	{
                         if(bsgs_ggsb.block_size == 0){
                                 bsgs_ggsb.block_size = m_val;
                         }
-                        if (bsgs_ggsb.block_count > 1) {
-                                fprintf(stderr,
-                                        "[W] GGSB block partitioning is not available in this build; "
-                                        "collapsing to a single block.\n");
+                        if (!bsgs_ggsb.block_count) {
                                 bsgs_ggsb.block_count = 1;
-                                bsgs_ggsb.block_size = m_val;
                         }
                 } else {
                         bsgs_ggsb.block_count = 0;
                         bsgs_ggsb.block_size = 0;
-			}
+                        }
 		}
 		else	{
 			fprintf(stderr,"[E] -n param doesn't have exact square root\n");
@@ -1655,28 +1651,24 @@ free(hextemp);
                 double shard_mb = (double)shard_bytes / 1048576.0;
                 double layer_total_mb = shard_mb * 256.0;
 
-                uint64_t requested_blocks = (bsgs_ggsb.enabled && bsgs_ggsb.block_count) ? bsgs_ggsb.block_count : 1;
-                uint64_t effective_blocks = 1; // table creation still builds a single classic block
-                uint64_t block_babies = (uint64_t)bsgs_m;
+                uint64_t effective_blocks = (bsgs_ggsb.enabled && bsgs_ggsb.block_count)
+                        ? bsgs_ggsb.block_count
+                        : 1;
+                uint64_t block_babies = (bsgs_ggsb.enabled && bsgs_ggsb.block_size)
+                        ? bsgs_ggsb.block_size
+                        : (uint64_t)bsgs_m;
+                uint64_t total_babies = (uint64_t)bsgs_m;
                 double ptable_mb = (double)(block_babies * sizeof(struct bsgs_xvalue)) / 1048576.0;
+                double ptable_total_mb = (double)(total_babies * sizeof(struct bsgs_xvalue)) / 1048576.0;
 
                 fprintf(stderr,
-                        "[i] BSGS table build: classic layout, creating %" PRIu64 " block(s) "
-                        "(%" PRIu64 " requested) of %" PRIu64 " babies each.\n",
-                        effective_blocks, requested_blocks, block_babies);
+                        "[i] BSGS table build: %s layout, creating %" PRIu64 " block(s) of %" PRIu64 " babies each.\n",
+                        (effective_blocks > 1) ? "GGSB" : "classic",
+                        effective_blocks,
+                        block_babies);
                 fprintf(stderr,
-                        "[i] Expected sizes: each bloom layer ~%.2f MB (256 shards), bPtable ~%.2f MB.\n",
-                        layer_total_mb, ptable_mb);
-
-                if (bsgs_ggsb.enabled && bsgs_ggsb.block_count > 1) {
-                        fprintf(stderr,
-                                "[W] GGSB block partitioning is not applied during table creation yet; "
-                                "building a single classic block of %" PRIu64 " babies.\n",
-                                (uint64_t)bsgs_m);
-                        fprintf(stderr,
-                                "[W] Each bloom shard is ~%.2f MB (%zu shards -> %.2f MB per layer).\n",
-                                shard_mb, (size_t)256, layer_total_mb);
-                }
+                        "[i] Expected sizes: each bloom layer ~%.2f MB (256 shards), bPtable ~%.2f MB per block (%.2f MB total).\n",
+                        layer_total_mb, ptable_mb, ptable_total_mb);
 
                 printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m);
 		bloom_bP = (struct bloom*)calloc(256,sizeof(struct bloom));
