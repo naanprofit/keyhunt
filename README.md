@@ -752,6 +752,13 @@ Line of execution in random mode `-R` or -B random
 
 GGSB mode can be selected with `-B ggsb`. Pair it with either `--bsgs-block-count <n>` or `--bsgs-block-size <n>` to describe how the baby table should be segmented; if only one is supplied the other is derived automatically. Leaving both unset keeps a single block so classic behaviour is preserved.
 
+**What performance to expect from GGSB?** Splitting the table gives you two practical benefits:
+
+1. **Parallel I/O and cache locality.** Each block is built and probed independently, so on multi-disk or network storage you can see near-linear speedups up to the point where your storage saturates. On a single SSD this usually translates to a modest gain (often 1.1–1.4×) from better cache fit and shorter seek spans per block.
+2. **Faster retries and restarts.** Because blocks are smaller, rebuilds after interruptions or parameter changes finish sooner, and you can retry a subset without regenerating the full monolithic table.
+
+If you do not need those characteristics, classic single-block BSGS remains the simplest option and avoids extra metadata overhead.
+
 Example table creation and search in GGSB mode:
 
 ```bash
@@ -770,7 +777,7 @@ Run the BSGS daemon with the same layout:
 ./keyhunt -m bsgs -f tests/1to63_65.txt -k 8 -r 0:1000000 -q -S --tmpdir ./bloomfiles
 ```
 
-This builds only a few MB of blooms and a small bPtable so you can validate your flags. Large ranges (e.g., `-n 0x40000000000000` with large `-k`) will legitimately create tens of GB per bloom layer because table creation still uses a single classic block even if `--bsgs-block-count` is provided.
+This builds only a few MB of blooms and a small bPtable so you can validate your flags. Large ranges (e.g., `-n 0x40000000000000` with large `-k`) will legitimately create tens of GB per bloom layer; when you specify `--bsgs-block-count` the per-block sizes are derived automatically so you can split the allocation across multiple blocks instead of a single classic table.
 
 
 Example Output:

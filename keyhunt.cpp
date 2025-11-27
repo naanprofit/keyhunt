@@ -73,13 +73,6 @@ static int portable_posix_fallocate(int fd, off_t offset, off_t len) {
 #define posix_fallocate portable_posix_fallocate
 #endif
 
-#ifdef __unix__
-#ifdef __CYGWIN__
-#else
-#include <linux/random.h>
-#endif
-#endif
-
 #define CRYPTO_NONE 0
 #define CRYPTO_BTC 1
 #define CRYPTO_ETH 2
@@ -616,6 +609,7 @@ Int BSGS_M2;				//M2 is M/32
 Int BSGS_M2_double;			//M2_double is M2 * 2
 Int BSGS_M3;				//M3 is M2/32
 Int BSGS_M3_double;			//M3_double is M3 * 2
+Int BSGS_STEP;                          //Stride between base keys
 
 Int ONE;
 Int ZERO;
@@ -1491,16 +1485,19 @@ int main(int argc, char **argv)	{
 				} else if(bsgs_ggsb.block_size > 0 && bsgs_ggsb.block_count == 0){
 					bsgs_ggsb.block_count = (m_val + bsgs_ggsb.block_size - 1) / bsgs_ggsb.block_size;
 				}
-				if(bsgs_ggsb.block_count == 0){
-					bsgs_ggsb.block_count = 1;
-				}
-				if(bsgs_ggsb.block_size == 0){
-					bsgs_ggsb.block_size = m_val;
-				}
-			} else {
-				bsgs_ggsb.block_count = 0;
-				bsgs_ggsb.block_size = 0;
-			}
+                        if(bsgs_ggsb.block_count == 0){
+                                bsgs_ggsb.block_count = 1;
+                        }
+                        if(bsgs_ggsb.block_size == 0){
+                                bsgs_ggsb.block_size = m_val;
+                        }
+                        if (!bsgs_ggsb.block_count) {
+                                bsgs_ggsb.block_count = 1;
+                        }
+                } else {
+                        bsgs_ggsb.block_count = 0;
+                        bsgs_ggsb.block_size = 0;
+                        }
 		}
 		else	{
 			fprintf(stderr,"[E] -n param doesn't have exact square root\n");
@@ -1570,11 +1567,11 @@ int main(int argc, char **argv)	{
 		}
 		
 		BSGS_M_double.SetInt32(2);
-		BSGS_M_double.Mult(&BSGS_M);
-		
-		
-		BSGS_M2_double.SetInt32(2);
-		BSGS_M2_double.Mult(&BSGS_M2);
+BSGS_M_double.Mult(&BSGS_M);
+
+
+BSGS_M2_double.SetInt32(2);
+BSGS_M2_double.Mult(&BSGS_M2);
 		
 		BSGS_R.Set(&BSGS_M2);
 		BSGS_R.Mod(&BSGS_AUX);
@@ -1605,15 +1602,35 @@ int main(int argc, char **argv)	{
 
 		bsgs_m = BSGS_M.GetInt64();
 		bsgs_aux = BSGS_AUX.GetInt64();
-		
-		
-		BSGS_N_double.SetInt32(2);
-		BSGS_N_double.Mult(&BSGS_N);
 
-		
-		hextemp = BSGS_N.GetBase16();
-		printf("[+] N = 0x%s\n",hextemp);
-		free(hextemp);
+
+                BSGS_N_double.SetInt32(2);
+                BSGS_N_double.Mult(&BSGS_N);
+
+                /*
+                 * Walk the range in the same 2*N jumps originally used by the
+                 * sequential and top/bottom walkers. This keeps the per-thread
+                 * partitioning aligned with the bloom/table layout so hits are
+                 * not skipped.
+                 */
+                /*
+                 * Keep the step aligned to the table layout. In classic mode we walk in
+                 * 2*N jumps, but when GGSB splits the table into multiple blocks the
+                 * effective baby-step span per block is smaller. Use the block-sized
+                 * stride in that case so the walker doesn't leap over portions of the
+                 * window when several blocks are requested.
+                 */
+                if (bsgs_ggsb.enabled && bsgs_ggsb.block_count > 1 && bsgs_ggsb.block_size) {
+                        uint64_t block_stride = bsgs_ggsb.block_size * 2ULL;
+                        BSGS_STEP.SetInt64(block_stride);
+                } else {
+                        BSGS_STEP.Set(&BSGS_N_double);
+                }
+
+
+hextemp = BSGS_N.GetBase16();
+printf("[+] N = 0x%s\n",hextemp);
+free(hextemp);
 		if(((uint64_t)(bsgs_m/256)) > 10000)	{
 			itemsbloom = (uint64_t)(bsgs_m / 256);
 			if(bsgs_m % 256 != 0 )	{
@@ -1649,28 +1666,24 @@ int main(int argc, char **argv)	{
                 double shard_mb = (double)shard_bytes / 1048576.0;
                 double layer_total_mb = shard_mb * 256.0;
 
-                uint64_t requested_blocks = (bsgs_ggsb.enabled && bsgs_ggsb.block_count) ? bsgs_ggsb.block_count : 1;
-                uint64_t effective_blocks = 1; // table creation still builds a single classic block
-                uint64_t block_babies = (uint64_t)bsgs_m;
+                uint64_t effective_blocks = (bsgs_ggsb.enabled && bsgs_ggsb.block_count)
+                        ? bsgs_ggsb.block_count
+                        : 1;
+                uint64_t block_babies = (bsgs_ggsb.enabled && bsgs_ggsb.block_size)
+                        ? bsgs_ggsb.block_size
+                        : (uint64_t)bsgs_m;
+                uint64_t total_babies = (uint64_t)bsgs_m;
                 double ptable_mb = (double)(block_babies * sizeof(struct bsgs_xvalue)) / 1048576.0;
+                double ptable_total_mb = (double)(total_babies * sizeof(struct bsgs_xvalue)) / 1048576.0;
 
                 fprintf(stderr,
-                        "[i] BSGS table build: classic layout, creating %" PRIu64 " block(s) "
-                        "(%" PRIu64 " requested) of %" PRIu64 " babies each.\n",
-                        effective_blocks, requested_blocks, block_babies);
+                        "[i] BSGS table build: %s layout, creating %" PRIu64 " block(s) of %" PRIu64 " babies each.\n",
+                        (effective_blocks > 1) ? "GGSB" : "classic",
+                        effective_blocks,
+                        block_babies);
                 fprintf(stderr,
-                        "[i] Expected sizes: each bloom layer ~%.2f MB (256 shards), bPtable ~%.2f MB.\n",
-                        layer_total_mb, ptable_mb);
-
-                if (bsgs_ggsb.enabled && bsgs_ggsb.block_count > 1) {
-                        fprintf(stderr,
-                                "[W] GGSB block partitioning is not applied during table creation yet; "
-                                "building a single classic block of %" PRIu64 " babies.\n",
-                                (uint64_t)bsgs_m);
-                        fprintf(stderr,
-                                "[W] Each bloom shard is ~%.2f MB (%zu shards -> %.2f MB per layer).\n",
-                                shard_mb, (size_t)256, layer_total_mb);
-                }
+                        "[i] Expected sizes: each bloom layer ~%.2f MB (256 shards), bPtable ~%.2f MB per block (%.2f MB total).\n",
+                        layer_total_mb, ptable_mb, ptable_total_mb);
 
                 printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m);
 		bloom_bP = (struct bloom*)calloc(256,sizeof(struct bloom));
@@ -2705,9 +2718,9 @@ int main(int argc, char **argv)	{
 			s = 0;
 			switch(FLAGBSGSMODE)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
-				case 0:
-					tid[j] = CreateThread(NULL, 0, thread_process_bsgs, (void*)tt, 0, &s);
-					break;
+                                case 0:
+                                        tid[j] = CreateThread(NULL, 0, thread_process_bsgs, (void*)tt, 0, &s);
+                                        break;
 				case 1:
 					tid[j] = CreateThread(NULL, 0, thread_process_bsgs_backward, (void*)tt, 0, &s);
 					break;
@@ -2717,28 +2730,36 @@ int main(int argc, char **argv)	{
 				case 3:
 					tid[j] = CreateThread(NULL, 0, thread_process_bsgs_random, (void*)tt, 0, &s);
 					break;
-				case 4:
-					tid[j] = CreateThread(NULL, 0, thread_process_bsgs_dance, (void*)tt, 0, &s);
-					break;
-				}
+                                case 4:
+                                        tid[j] = CreateThread(NULL, 0, thread_process_bsgs_dance, (void*)tt, 0, &s);
+                                        break;
+                                case 5:
+                                        /* GGSB currently reuses the sequential worker */
+                                        tid[j] = CreateThread(NULL, 0, thread_process_bsgs, (void*)tt, 0, &s);
+                                        break;
+                                }
 #else
-				case 0:
-					s = pthread_create(&tid[j],NULL,thread_process_bsgs,(void *)tt);
-				break;
+                                case 0:
+                                        s = pthread_create(&tid[j],NULL,thread_process_bsgs,(void *)tt);
+                                break;
 				case 1:
 					s = pthread_create(&tid[j],NULL,thread_process_bsgs_backward,(void *)tt);
 				break;
 				case 2:
 					s = pthread_create(&tid[j],NULL,thread_process_bsgs_both,(void *)tt);
 				break;
-				case 3:
-					s = pthread_create(&tid[j],NULL,thread_process_bsgs_random,(void *)tt);
-				break;
-				case 4:
-					s = pthread_create(&tid[j],NULL,thread_process_bsgs_dance,(void *)tt);
-				break;
+                                case 3:
+                                        s = pthread_create(&tid[j],NULL,thread_process_bsgs_random,(void *)tt);
+                                break;
+                                case 4:
+                                        s = pthread_create(&tid[j],NULL,thread_process_bsgs_dance,(void *)tt);
+                                break;
+                                case 5:
+                                        /* GGSB currently reuses the sequential worker */
+                                        s = pthread_create(&tid[j],NULL,thread_process_bsgs,(void *)tt);
+                                break;
 #endif
-			}
+                        }
 #if defined(_WIN64) && !defined(__CYGWIN__)
 			if (tid[j] == NULL) {
 #else
@@ -2904,12 +2925,13 @@ int main(int argc, char **argv)	{
                                                         str_total, str_seconds,
                                                         str_divpretotal, str_limits_prefixs[i],
                                                         str_pretotal);
-                                        } else if (THREADOUTPUT == 1) {
+                                        } else {
                                                 sprintf(buffer,
                                                         "\r[+] Total %s keys in %s seconds: ~%s %s (%s keys/s)\r",
                                                         str_total, str_seconds,
                                                         str_divpretotal, str_limits_prefixs[i],
                                                         str_pretotal);
+                                                THREADOUTPUT = 1;
                                         }
                                         free(str_divpretotal);
                                 }
@@ -4566,7 +4588,7 @@ void *thread_process_bsgs(void *vargp)	{
 #endif
 
 		base_key.Set(&BSGS_CURRENT);	/* we need to set our base_key to the current BSGS_CURRENT value*/
-		BSGS_CURRENT.Add(&BSGS_N_double);		/*Then add 2*BSGS_N to BSGS_CURRENT*/
+		BSGS_CURRENT.Add(&BSGS_STEP);		/*Then add 2*BSGS_N to BSGS_CURRENT*/
 		/*
 		BSGS_CURRENT.Add(&BSGS_N);		//Then add BSGS_N to BSGS_CURRENT
 		BSGS_CURRENT.Add(&BSGS_N);		//Then add BSGS_N to BSGS_CURRENT
@@ -5580,7 +5602,7 @@ void *thread_process_bsgs_dance(void *vargp)	{
 					n_range_end.Sub(&BSGS_N);
 					n_range_end.Sub(&BSGS_N);
 				*/
-					n_range_end.Sub(&BSGS_N_double);
+					n_range_end.Sub(&BSGS_STEP);
 					if(n_range_end.IsLower(&BSGS_CURRENT))	{
 						base_key.Set(&BSGS_CURRENT);
 					}
@@ -5596,7 +5618,7 @@ void *thread_process_bsgs_dance(void *vargp)	{
 			if(BSGS_CURRENT.IsLower(&n_range_end))	{
 				base_key.Set(&BSGS_CURRENT);
 				//BSGS_N_double
-				BSGS_CURRENT.Add(&BSGS_N_double);
+				BSGS_CURRENT.Add(&BSGS_STEP);
 				/*
 				BSGS_CURRENT.Add(&BSGS_N);
 				BSGS_CURRENT.Add(&BSGS_N);
@@ -5861,7 +5883,7 @@ void *thread_process_bsgs_backward(void *vargp)	{
 		pthread_mutex_lock(&bsgs_thread);
 #endif
 		if(n_range_end.IsGreater(&n_range_start))	{
-			n_range_end.Sub(&BSGS_N_double);
+			n_range_end.Sub(&BSGS_STEP);
 			if(n_range_end.IsLower(&n_range_start))	{
 				base_key.Set(&n_range_start);
 			}
@@ -6124,7 +6146,7 @@ void *thread_process_bsgs_both(void *vargp)	{
 		switch(r)	{
 			case 0:	//TOP
 				if(n_range_end.IsGreater(&BSGS_CURRENT))	{
-						n_range_end.Sub(&BSGS_N_double);
+						n_range_end.Sub(&BSGS_STEP);
 						/*
 						n_range_end.Sub(&BSGS_N);
 						n_range_end.Sub(&BSGS_N);
@@ -6144,7 +6166,7 @@ void *thread_process_bsgs_both(void *vargp)	{
 				if(BSGS_CURRENT.IsLower(&n_range_end))	{
 					base_key.Set(&BSGS_CURRENT);
 					//BSGS_N_double
-					BSGS_CURRENT.Add(&BSGS_N_double);
+					BSGS_CURRENT.Add(&BSGS_STEP);
 					/*
 					BSGS_CURRENT.Add(&BSGS_N);
 					BSGS_CURRENT.Add(&BSGS_N);

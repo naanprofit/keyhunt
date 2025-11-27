@@ -32,19 +32,16 @@ email: albertobsd@gmail.com
 #else
 #include <unistd.h>
 #include <pthread.h>
+#if !defined(__APPLE__)
 #include <sys/random.h>
+#endif
 #include <sys/mman.h>
 #include <getopt.h>
+#if !defined(__APPLE__)
 #include <sys/sysinfo.h>
+#endif
 #include <sys/stat.h>
 #include <fcntl.h>
-#endif
-
-#ifdef __unix__
-#ifdef __CYGWIN__
-#else
-#include <linux/random.h>
-#endif
 #endif
 
 #define CRYPTO_NONE 0
