@@ -1604,13 +1604,16 @@ BSGS_M2_double.Mult(&BSGS_M2);
 		bsgs_aux = BSGS_AUX.GetInt64();
 
 
-BSGS_N_double.SetInt32(2);
-BSGS_N_double.Mult(&BSGS_N);
-/*
- * Use the baby-step width as the stride between base keys so the scan walks
- * contiguous buckets of the search window instead of leaping past most of it.
- */
-BSGS_STEP.Set(&BSGS_M);
+                BSGS_N_double.SetInt32(2);
+                BSGS_N_double.Mult(&BSGS_N);
+
+                /*
+                 * Walk the range in the same 2*N jumps originally used by the
+                 * sequential and top/bottom walkers. This keeps the per-thread
+                 * partitioning aligned with the bloom/table layout so hits are
+                 * not skipped.
+                 */
+                BSGS_STEP.Set(&BSGS_N_double);
 
 
 hextemp = BSGS_N.GetBase16();
