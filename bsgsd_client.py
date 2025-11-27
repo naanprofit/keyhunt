@@ -190,6 +190,7 @@ def worker_loop(
     match_queue: "queue.Queue[MatchResult]",
     timeout_queue: "queue.Queue[TimeoutRecord]",
     stop_event: threading.Event,
+    producer_done: threading.Event,
     timeout_sec: float,
     max_retries: int,
     retry_timeouts: bool,
@@ -207,7 +208,7 @@ def worker_loop(
         try:
             task: ChunkTask = task_queue.get(timeout=1.0)
         except queue.Empty:
-            if stop_event.is_set():
+            if stop_event.is_set() or producer_done.is_set():
                 break
             continue
 
@@ -295,6 +296,7 @@ def scan_for_pubkey(
     verbose: bool,
     use_http: bool,
     http_path: str,
+    queue_max: int = 1000,
 ) -> Optional[MatchResult]:
     print(f"\n[INFO] === Target pubkey: {pubkey} ===", flush=True)
     print(f"[INFO] Global range {global_start:x}:{global_end:x}", flush=True)
@@ -303,13 +305,28 @@ def scan_for_pubkey(
     if use_http:
         print(f"[INFO] HTTP mode enabled (path: {http_path})", flush=True)
 
-    task_queue: "queue.Queue[ChunkTask]" = queue.Queue()
+    task_queue: "queue.Queue[ChunkTask]" = queue.Queue(maxsize=queue_max)
     match_queue: "queue.Queue[MatchResult]" = queue.Queue()
     timeout_queue: "queue.Queue[TimeoutRecord]" = queue.Queue()
     stop_event = threading.Event()
+    producer_done = threading.Event()
 
-    for start, end in chunk_range(global_start, global_end, chunk_size):
-        task_queue.put(ChunkTask(start=start, end=end, attempt=1))
+    def producer():
+        try:
+            for start, end in chunk_range(global_start, global_end, chunk_size):
+                while not stop_event.is_set():
+                    try:
+                        task_queue.put(ChunkTask(start=start, end=end, attempt=1), timeout=1.0)
+                        break
+                    except queue.Full:
+                        if stop_event.is_set():
+                            return
+                        continue
+        finally:
+            producer_done.set()
+
+    producer_thread = threading.Thread(target=producer, daemon=True)
+    producer_thread.start()
 
     threads: List[threading.Thread] = []
     for idx, host in enumerate(hosts):
@@ -324,6 +341,7 @@ def scan_for_pubkey(
                 match_queue=match_queue,
                 timeout_queue=timeout_queue,
                 stop_event=stop_event,
+                producer_done=producer_done,
                 timeout_sec=timeout_sec,
                 max_retries=max_retries,
                 retry_timeouts=retry_timeouts,
@@ -344,7 +362,7 @@ def scan_for_pubkey(
             found = match_queue.get(timeout=1.0)
             break
         except queue.Empty:
-            if stop_event.is_set():
+            if stop_event.is_set() and task_queue.empty() and producer_done.is_set():
                 break
             if task_queue.empty() and all(not t.is_alive() for t in threads):
                 break
@@ -359,6 +377,7 @@ def scan_for_pubkey(
             break
         timed_out_records.append(rec)
 
+    producer_thread.join(timeout=2.0)
     for t in threads:
         t.join(timeout=2.0)
 
@@ -431,6 +450,12 @@ def main():
         default="/search",
         help="HTTP path to POST to when --http is set (default /search)",
     )
+    ap.add_argument(
+        "--queue-depth",
+        type=int,
+        default=1000,
+        help="Max queued chunks in memory (producer throttles when full)",
+    )
     args = ap.parse_args()
 
     global_start, global_end = parse_range(args.range)
@@ -466,6 +491,7 @@ def main():
                 verbose=args.verbose,
                 use_http=args.http,
                 http_path=args.http_path,
+                queue_max=args.queue_depth,
             )
             if result is None:
                 print(f"[INFO] No match found for pubkey {pub} in full range", flush=True)
