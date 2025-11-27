@@ -3345,11 +3345,12 @@ void* client_handler(void* arg) {
 	int message_len;
 	if(bsgs_found)	{
 		hextemp = BSGSkeyfound.GetBase16();
-		message_len = snprintf(buffer, sizeof(buffer), "%s",hextemp);
+		message_len = snprintf(buffer, sizeof(buffer), "%s\n",hextemp);
 		free(hextemp);
 	}
 	else	{
-		message_len = snprintf(buffer, sizeof(buffer), "404 Not Found");
+		static const char *notfound_msg = "404 Not Found\n";
+		message_len = snprintf(buffer, sizeof(buffer), "%s", notfound_msg);
 	}
 	bsgs_found = 0;
 	int bytes_sent = send(client_fd, buffer, message_len, 0);
