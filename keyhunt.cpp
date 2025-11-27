@@ -1613,7 +1613,19 @@ BSGS_M2_double.Mult(&BSGS_M2);
                  * partitioning aligned with the bloom/table layout so hits are
                  * not skipped.
                  */
-                BSGS_STEP.Set(&BSGS_N_double);
+                /*
+                 * Keep the step aligned to the table layout. In classic mode we walk in
+                 * 2*N jumps, but when GGSB splits the table into multiple blocks the
+                 * effective baby-step span per block is smaller. Use the block-sized
+                 * stride in that case so the walker doesn't leap over portions of the
+                 * window when several blocks are requested.
+                 */
+                if (bsgs_ggsb.enabled && bsgs_ggsb.block_count > 1 && bsgs_ggsb.block_size) {
+                        uint64_t block_stride = bsgs_ggsb.block_size * 2ULL;
+                        BSGS_STEP.SetInt64(block_stride);
+                } else {
+                        BSGS_STEP.Set(&BSGS_N_double);
+                }
 
 
 hextemp = BSGS_N.GetBase16();
