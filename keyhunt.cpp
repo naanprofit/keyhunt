@@ -2830,10 +2830,22 @@ int main(int argc, char **argv)	{
                         MPZAUX.Mod(&OUTPUTSECONDS);
                         if (MPZAUX.IsZero()) {
                                 total.SetInt32(0);
-                                for (j = 0; j < NTHREADS; j++) {
+                                /*
+                                 * Use the aggregated BSGS step counter when available so we
+                                 * still report progress even if individual thread step
+                                 * counters are not advancing (or are unavailable in the daemon
+                                 * style flows).
+                                 */
+                                if (FLAGMODE == MODE_BSGS) {
                                         pretotal.Set(&debugcount_mpz);
-                                        pretotal.Mult(steps[j].load(std::memory_order_relaxed));
+                                        pretotal.Mult(bsgs_steps_total.load(std::memory_order_relaxed));
                                         total.Add(&pretotal);
+                                } else {
+                                        for (j = 0; j < NTHREADS; j++) {
+                                                pretotal.Set(&debugcount_mpz);
+                                                pretotal.Mult(steps[j].load(std::memory_order_relaxed));
+                                                total.Add(&pretotal);
+                                        }
                                 }
 
                                 if (FLAGENDOMORPHISM) {

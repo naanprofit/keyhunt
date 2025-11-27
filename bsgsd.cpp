@@ -3258,6 +3258,10 @@ void* client_handler(void* arg) {
         Tokenizer t;
         t.tokens = NULL;
 
+        /* Reset per-request state */
+        bsgs_found = 0;
+        BSGSkeyfound.SetInt32(0);
+
 #ifdef SO_NOSIGPIPE
         int setopt_val = 1;
         setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &setopt_val, sizeof(setopt_val));
@@ -3371,17 +3375,32 @@ void* client_handler(void* arg) {
 		std::vector<char> line_buf(line.begin(), line.end());
 		line_buf.push_back('\0');
                 stringtokenizer(line_buf.data(), &t);
-		if (t.n != 3) {
-			printf("Invalid input format from client, tokens %i : %s\n",t.n, line.c_str());
-			freetokenizer(&t);
-			sendstr(client_fd,"400 Bad Request");
-			close(client_fd);
-			pthread_exit(NULL);
-		}
-		pubkey_str.assign(t.tokens[0]);
-		n_start_hex.assign(t.tokens[1]);
-		n_end_hex.assign(t.tokens[2]);
-		freetokenizer(&t);
+                if (t.n < 2) {
+                        printf("Invalid input format from client, tokens %i : %s\n",t.n, line.c_str());
+                        freetokenizer(&t);
+                        sendstr(client_fd,"400 Bad Request");
+                        close(client_fd);
+                        pthread_exit(NULL);
+                }
+
+                pubkey_str.assign(t.tokens[0]);
+                if (t.n >= 3) {
+                        n_start_hex.assign(t.tokens[1]);
+                        n_end_hex.assign(t.tokens[2]);
+                } else {
+                        const char *range_token = t.tokens[1];
+                        const char *colon = strchr(range_token, ':');
+                        if (colon == NULL || colon == range_token || colon[1] == '\0') {
+                                printf("Invalid range format from client: %s\n", range_token);
+                                freetokenizer(&t);
+                                sendstr(client_fd,"400 Bad Request");
+                                close(client_fd);
+                                pthread_exit(NULL);
+                        }
+                        n_start_hex.assign(range_token, (size_t)(colon - range_token));
+                        n_end_hex.assign(colon + 1);
+                }
+                freetokenizer(&t);
 	}
 
 	std::vector<char> pubkey_buf(pubkey_str.begin(), pubkey_str.end());
