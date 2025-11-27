@@ -1610,7 +1610,11 @@ BSGS_M2_double.Mult(&BSGS_M2);
 
 BSGS_N_double.SetInt32(2);
 BSGS_N_double.Mult(&BSGS_N);
-BSGS_STEP.Set(&BSGS_N);
+/*
+ * Use the baby-step width as the stride between base keys so the scan walks
+ * contiguous buckets of the search window instead of leaping past most of it.
+ */
+BSGS_STEP.Set(&BSGS_M);
 
 
 hextemp = BSGS_N.GetBase16();
