@@ -10,6 +10,8 @@ email: albertobsd@gmail.com
 #include <math.h>
 #include <ctype.h>
 #include <time.h>
+#include <errno.h>
+#include <signal.h>
 #include <vector>
 #include <inttypes.h>
 #include "base58/libbase58.h"
@@ -107,6 +109,8 @@ Point _2GSn;
 
 void menu();
 void init_generator();
+
+static bool safe_send(int client_fd,const char *buf,size_t len);
 
 bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom);
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname = NULL);
@@ -676,14 +680,15 @@ int main(int argc, char **argv)	{
 	struct bPload *bPload_temp_ptr;
 
 	// Sizes
-        size_t rsize;
+	size_t rsize;
 
-	
+
 	pthread_mutex_init(&write_keys,NULL);
 	pthread_mutex_init(&write_random,NULL);
 	pthread_mutex_init(&mutex_bsgs_thread,NULL);
 
 	srand(time(NULL));
+	signal(SIGPIPE, SIG_IGN);
 
 	secp = new Secp256K1();
 	secp->Init();
@@ -3248,10 +3253,15 @@ void* client_handler(void* arg) {
     int client_fd = *client_ptr;
     free(client_ptr);
     char buffer[1024];
-	char *hextemp;
-	int bytes_received;
-	Tokenizer t;
-	t.tokens = NULL;
+        char *hextemp;
+        int bytes_received;
+        Tokenizer t;
+        t.tokens = NULL;
+
+#ifdef SO_NOSIGPIPE
+        int setopt_val = 1;
+        setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &setopt_val, sizeof(setopt_val));
+#endif
 	
 	bool http_mode = false;
 	std::string pubkey_str;
@@ -3453,23 +3463,21 @@ void* client_handler(void* arg) {
 		int hlen = snprintf(header,sizeof(header),"%sContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",status_line,body.size());
 		std::string response(header, hlen);
 		response += body;
-		int bytes_sent = send(client_fd, response.c_str(), response.size(), 0);
-		if (bytes_sent == -1) {
+		if(!safe_send(client_fd, response.c_str(), response.size())) {
 			printf("Failed to send message to client\n");
 		}
 	} else {
 		int message_len;
-		if(bsgs_found)	{
+		if(bsgs_found)  {
 			hextemp = BSGSkeyfound.GetBase16();
 			message_len = snprintf(buffer, sizeof(buffer), "%s\n",hextemp);
 			free(hextemp);
 		}
-		else	{
+		else    {
 			static const char *notfound_msg = "404 Not Found\n";
 			message_len = snprintf(buffer, sizeof(buffer), "%s", notfound_msg);
 		}
-		int bytes_sent = send(client_fd, buffer, message_len, 0);
-		if (bytes_sent == -1) {
+		if(!safe_send(client_fd, buffer, message_len)) {
 			printf("Failed to send message to client\n");
 		}
 	}
@@ -3479,11 +3487,39 @@ void* client_handler(void* arg) {
 	pthread_exit(NULL);
 }
 
-int sendstr(int client_fd,const char *str)	{
-	int len = strlen(str);
-	int bytes = send(client_fd, str, len, 0);
-	if (bytes == -1) {
-		printf("Failed to send message to client\n");
+static bool safe_send(int client_fd,const char *buf,size_t len) {
+	size_t sent = 0;
+	while(sent < len) {
+		ssize_t n = send(client_fd, buf + sent, len - sent,
+#ifdef MSG_NOSIGNAL
+				 MSG_NOSIGNAL
+#else
+				 0
+#endif
+		);
+		if(n < 0) {
+			if(errno == EINTR) {
+				continue;
+			}
+			if(errno == EPIPE) {
+				return false;
+			}
+			return false;
+		}
+		if(n == 0) {
+			return false;
+		}
+		sent += (size_t)n;
 	}
-	return bytes;
+	return true;
+}
+
+int sendstr(int client_fd,const char *str)	{
+	size_t len = strlen(str);
+	bool ok = safe_send(client_fd, str, len);
+	if(!ok) {
+		printf("Failed to send message to client\n");
+		return -1;
+	}
+	return (int)len;
 }
