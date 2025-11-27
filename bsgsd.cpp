@@ -3275,9 +3275,9 @@ void* client_handler(void* arg) {
 		pthread_exit(NULL);
 	}
 
-	if(bytes_received >= 4 && strncmp(buffer,"POST",4) == 0) {
-		http_mode = true;
-	}
+        if((bytes_received >= 1) && memcmp(buffer, "POST", (bytes_received < 4) ? bytes_received : 4) == 0) {
+                http_mode = true;
+        }
 
 	if(http_mode) {
 		std::string request;
@@ -3349,19 +3349,30 @@ void* client_handler(void* arg) {
 		}
 	}
 	else {
-		char* newline = (char*) memchr(buffer, '\n', bytes_received);
-		size_t line_length = newline ? (newline - buffer) + 1 : bytes_received;
-		bytes_received = recv(client_fd, buffer, line_length, 0);
-		if (bytes_received <= 0)	{
-			close(client_fd);
-			pthread_exit(NULL);
-		}
+		// Read a single-line request: <pubkey_hex> <from_hex>:<to_hex>\n
+		std::string line;
+		line.reserve(256);
+		ssize_t recvd;
+		do {
+			recvd = recv(client_fd, buffer, sizeof(buffer), 0);
+			if (recvd <= 0) {
+				close(client_fd);
+				pthread_exit(NULL);
+			}
+			line.append(buffer, recvd);
+			if(line.size() > 4096) {
+				printf("Invalid input too long from client\n");
+				sendstr(client_fd,"400 Bad Request");
+				close(client_fd);
+				pthread_exit(NULL);
+			}
+		} while(line.find('\n') == std::string::npos);
 
-		// Process the received bytes here
-		buffer[bytes_received] = '\0';
-		stringtokenizer(buffer, &t);
+		std::vector<char> line_buf(line.begin(), line.end());
+		line_buf.push_back('\0');
+                stringtokenizer(line_buf.data(), &t);
 		if (t.n != 3) {
-			printf("Invalid input format from client, tokens %i : %s\n",t.n, buffer);
+			printf("Invalid input format from client, tokens %i : %s\n",t.n, line.c_str());
 			freetokenizer(&t);
 			sendstr(client_fd,"400 Bad Request");
 			close(client_fd);
