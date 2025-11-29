@@ -12,6 +12,7 @@ Same as keyhunt we need to do
  - `-t number` Threads Number
  - `-k factor` Same K factor dor keyhunt
  - `-B ggsb`  Enable the Grumpy Giants and Strolling Babies mode for BSGS scheduling
+ - `-B angrygiant` Process the busiest giant-step buckets first to cut down on empty bloom checks
  - `--bsgs-block-count` / `--bsgs-block-size` Optional GGSB partitioning controls
  - `-n number` Length of the Range to scan each cycle, same as keyhunt
  - `-i ip`     IP for listening default is `127.0.0.1`

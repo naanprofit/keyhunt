@@ -759,6 +759,10 @@ GGSB mode can be selected with `-B ggsb`. Pair it with either `--bsgs-block-coun
 
 If you do not need those characteristics, classic single-block BSGS remains the simplest option and avoids extra metadata overhead.
 
+**Angry Giant search (`-B angrygiant`).** This variant keeps the classic giant-step walk but reorders each batch of bloom checks so
+the busiest buckets are probed first. When your blooms are split per leading byte (the default), this improves cache locality and
+reduces wasted lookups in empty buckets, especially when many points collapse into a handful of hot buckets.
+
 Example table creation and search in GGSB mode:
 
 ```bash
