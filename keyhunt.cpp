@@ -1957,23 +1957,27 @@ free(hextemp);
                        memset(bPtable,0,bytes);
                }
 		
-               if(FLAGLOADPTABLE && bptable_filename){
-                       if(md5_file(bptable_filename, bptable_md5) == 0){
+               if(FLAGLOADPTABLE && bptable_filename && FLAGPTABLECACHE){
+                       char md5_path[4096];
+                       snprintf(md5_path, sizeof(md5_path), "%s.md5", bptable_filename);
+
+                       if(read_md5_file(md5_path, bptable_md5) == 0){
                                FLAGBPTABLEMD5_READY = 1;
-                               char md5_path[4096];
-                               snprintf(md5_path, sizeof(md5_path), "%s.md5", bptable_filename);
+                               printf("[+] bP table MD5 loaded (%s)\n", md5_path);
+                       } else if(md5_file(bptable_filename, bptable_md5) == 0){
+                               FLAGBPTABLEMD5_READY = 1;
                                uint8_t md5_disk[16];
                                if(read_md5_file(md5_path, md5_disk) == 0){
                                        if(memcmp(md5_disk, bptable_md5, 16) == 0){
                                                printf("[+] bP table MD5 verified (%s)\n", md5_path);
-                                       }else{
+                                       } else {
                                                printf("[W] bP table MD5 mismatch (%s); refreshing\n", md5_path);
                                        }
                                }
                                if(write_md5_file(md5_path, bptable_md5) != 0){
                                        fprintf(stderr,"[W] Unable to write bP table MD5 file %s\n", md5_path);
                                }
-                       }else{
+                       } else {
                                fprintf(stderr,"[W] Unable to compute MD5 for bP table %s\n", bptable_filename);
                        }
                }
