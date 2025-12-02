@@ -7723,23 +7723,6 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                 return true;
         }
 
-        if(!mapped_entries_override) {
-                struct stat st;
-                if(stat(mapname,&st) == 0) {
-                        bool r = true;
-                        if(bloom_load(bloom_arg,(char*)mapname) != 0) {
-                                fprintf(stderr,"[E] bloom_load failed for '%s'\n",mapname);
-                                r = false;
-                        } else if(!bloom_arg->bytes){
-                                fprintf(stderr,"[E] Existing bloom file '%s' is empty; delete it or rerun without --load-bloom\n",mapname);
-                                r = false;
-                        } else {
-                                printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
-                        }
-                        return r;
-                }
-        }
-
         return initBloomFilter(bloom_arg,items_bloom);
 }
 
