@@ -46,7 +46,11 @@ of entries and hash functions. `--mapped-chunks <n>` splits the filter across `n
 sequential chunk files (e.g. `bloom.dat.0`, `bloom.dat.1`, ...). Use
 `--create-mapped[=size]` to preallocate and zero a mapped bloom filter file
 without starting a search. Without `--mapped`, keyhunt will keep the bloom filter
-in memory and will warn if it does not fit in the available RAM.
+in memory and will warn if it does not fit in the available RAM. Use
+`--bloom-file <file>` to choose the bloom filter path. Pair it with
+`--load-bloom` to load an existing bloom file directly into RAM when
+`--mapped` is not provided, or combine it with `--mapped` to memory map the
+filter instead.
 
 ### Memory mapped bP table
 

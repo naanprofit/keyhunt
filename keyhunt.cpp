@@ -766,12 +766,10 @@ int main(int argc, char **argv)	{
                               FLAGMAPPED = 1;
                               mapped_chunks = strtoul(optarg, NULL, 10);
                     } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
-                             FLAGMAPPED = 1;
                              mapped_filename = optarg;
                     } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
-                             FLAGMAPPED = 1;
                              FLAGLOADBLOOM = 1;
-                     } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
+                      } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
                              bptable_filename = optarg;
                       } else if (strcmp(long_options[option_index].name, "ptable-size") == 0) {
                               char *end;
@@ -7630,13 +7628,13 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
 
 
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname) {
+        const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+        uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
+
         if(FLAGMAPPED) {
                 static bool mapped_override_applied = false;
                 bool r = true;
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
-               const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
-
-               uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
 
                /* Explicit load-only mode for mapped bloom filters */
                if(FLAGLOADBLOOM) {
@@ -7705,6 +7703,43 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
                return r;
         }
+
+        /* Non-mapped path: allow legacy on-disk bloom files to load into RAM */
+        if(FLAGLOADBLOOM) {
+                struct stat st;
+                if(stat(mapname,&st) != 0) {
+                        fprintf(stderr,"[E] --load-bloom specified but bloom file '%s' does not exist\n",mapname);
+                        return false;
+                }
+                if(bloom_load(bloom_arg,(char*)mapname) != 0) {
+                        fprintf(stderr,"[E] bloom_load failed for '%s'\n",mapname);
+                        return false;
+                }
+                if(!bloom_arg->bytes){
+                        fprintf(stderr,"[E] Bloom file '%s' has zero length; regenerate it or remove --load-bloom\n",mapname);
+                        return false;
+                }
+                printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                return true;
+        }
+
+        if(!mapped_entries_override) {
+                struct stat st;
+                if(stat(mapname,&st) == 0) {
+                        bool r = true;
+                        if(bloom_load(bloom_arg,(char*)mapname) != 0) {
+                                fprintf(stderr,"[E] bloom_load failed for '%s'\n",mapname);
+                                r = false;
+                        } else if(!bloom_arg->bytes){
+                                fprintf(stderr,"[E] Existing bloom file '%s' is empty; delete it or rerun without --load-bloom\n",mapname);
+                                r = false;
+                        } else {
+                                printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                        }
+                        return r;
+                }
+        }
+
         return initBloomFilter(bloom_arg,items_bloom);
 }
 
