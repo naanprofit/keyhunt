@@ -169,10 +169,11 @@ int THREADOUTPUT = 0;
 char *bit_range_str_min;
 char *bit_range_str_max;
 
-const char *bsgs_modes[6] = {"secuential","backward","both","random","dance","ggsb"};
+const char *bsgs_modes[7] = {"secuential","backward","both","random","dance","ggsb","angrygiant"};
 
 enum {
-        BSGS_MODE_GGSB = 5
+        BSGS_MODE_GGSB = 5,
+        BSGS_MODE_ANGRY_GIANT = 6
 };
 
 struct BsgsGgsbConfig {
@@ -875,13 +876,13 @@ int main(int argc, char **argv)	{
 				}
 				printf("[+] K factor %i\n",KFACTOR);
 			break;
-			case 'B':
-				index_value = indexOf(optarg,bsgs_modes,6);
-				if(index_value >= 0 && index_value <= 5){
-					FLAGBSGSMODE = index_value;
-					if(index_value == BSGS_MODE_GGSB){
-						bsgs_ggsb.enabled = true;
-					}
+                        case 'B':
+                                index_value = indexOf(optarg,bsgs_modes,7);
+                                if(index_value >= 0 && index_value <= 6){
+                                        FLAGBSGSMODE = index_value;
+                                        if(index_value == BSGS_MODE_GGSB){
+                                                bsgs_ggsb.enabled = true;
+                                        }
 				}
 			break;
 			case 'n':
@@ -2454,7 +2455,8 @@ void *thread_process_bsgs(void *vargp)	{
         uint8_t giant_first_byte[CPU_GRP_SIZE];
         uint32_t giant_bucket_positions[CPU_GRP_SIZE];
         uint32_t giant_bucket_offsets[257];
-	grp->Set(dx);
+        bool angry_giant = (FLAGBSGSMODE == BSGS_MODE_ANGRY_GIANT);
+        grp->Set(dx);
 	
 
 	
@@ -2623,33 +2625,55 @@ pn.y.ModAdd(&GSn[i].y);
 
 				pts[0] = pn;
 				
-				uint32_t bucket_counts[256] = {0};
+                                uint32_t bucket_counts[256] = {0};
+                                uint32_t bucket_sizes[256];
 
-				for(int i = 0; i < CPU_GRP_SIZE; i++) {
-					pts[i].x.Get32Bytes(giant_xpoints[i]);
-					uint8_t bucket = giant_xpoints[i][0];
-					giant_first_byte[i] = bucket;
-					bucket_counts[bucket]++;
-				}
+                                for(int i = 0; i < CPU_GRP_SIZE; i++) {
+                                        pts[i].x.Get32Bytes(giant_xpoints[i]);
+                                        uint8_t bucket = giant_xpoints[i][0];
+                                        giant_first_byte[i] = bucket;
+                                        bucket_counts[bucket]++;
+                                }
 
-				giant_bucket_offsets[0] = 0;
-				for(int bucket = 0; bucket < 256; bucket++) {
-					giant_bucket_offsets[bucket + 1] = giant_bucket_offsets[bucket] + bucket_counts[bucket];
-				}
+                                giant_bucket_offsets[0] = 0;
+                                for(int bucket = 0; bucket < 256; bucket++) {
+                                        giant_bucket_offsets[bucket + 1] = giant_bucket_offsets[bucket] + bucket_counts[bucket];
+                                        bucket_sizes[bucket] = bucket_counts[bucket];
+                                }
 
-				for(int bucket = 0; bucket < 256; bucket++) {
-					bucket_counts[bucket] = 0;
-				}
+                                for(int bucket = 0; bucket < 256; bucket++) {
+                                        bucket_counts[bucket] = 0;
+                                }
 
-				for(int i = 0; i < CPU_GRP_SIZE; i++) {
-					uint8_t bucket = giant_first_byte[i];
-					uint32_t pos = giant_bucket_offsets[bucket] + bucket_counts[bucket]++;
-					giant_bucket_positions[pos] = i;
-				}
+                                for(int i = 0; i < CPU_GRP_SIZE; i++) {
+                                        uint8_t bucket = giant_first_byte[i];
+                                        uint32_t pos = giant_bucket_offsets[bucket] + bucket_counts[bucket]++;
+                                        giant_bucket_positions[pos] = i;
+                                }
 
-				for(int bucket = 0; bucket < 256 && !bsgs_found.load(std::memory_order_relaxed); bucket++) {
-					uint32_t start = giant_bucket_offsets[bucket];
-					uint32_t end = giant_bucket_offsets[bucket + 1];
+                                uint8_t bucket_order[256];
+                                for(int bucket = 0; bucket < 256; bucket++) {
+                                        bucket_order[bucket] = (uint8_t)bucket;
+                                }
+
+                                if(angry_giant) {
+                                        for(int i = 0; i < 255; i++) {
+                                                for(int j = i + 1; j < 256; j++) {
+                                                        if(bucket_sizes[bucket_order[j]] > bucket_sizes[bucket_order[i]]) {
+                                                                uint8_t tmp = bucket_order[i];
+                                                                bucket_order[i] = bucket_order[j];
+                                                                bucket_order[j] = tmp;
+                                                        }
+                                                }
+                                        }
+                                } else {
+                                        (void)bucket_sizes;
+                                }
+
+                                for(int order_index = 0; order_index < 256 && !bsgs_found.load(std::memory_order_relaxed); order_index++) {
+                                        uint8_t bucket = bucket_order[order_index];
+                                        uint32_t start = giant_bucket_offsets[bucket];
+                                        uint32_t end = giant_bucket_offsets[bucket + 1];
 
 					if(start == end) {
 						continue;
@@ -3172,7 +3196,7 @@ bin_publickey to generate the binary address, which is stored in dst_address. */
 void menu() {
 	printf("\nUsage:\n");
 	printf("-h          show this help\n");
-	printf("-B Mode     BSGS modes <sequential, backward, both, random, dance, ggsb>\n");
+   printf("-B Mode     BSGS modes <sequential, backward, both, random, dance, ggsb, angrygiant>\n");
 	printf("-k value    Use this only with bsgs mode, k value is factor for M, more speed but more RAM use wisely\n");
         printf("            K must not exceed the maximum allowed for N (see table below)\n");
 	printf("-n number   Check for N sequential numbers before the random chosen, this only works with -R option\n");

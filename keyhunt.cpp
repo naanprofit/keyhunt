@@ -416,7 +416,7 @@ static inline void print_status(const char *msg) {
 char *bit_range_str_min;
 char *bit_range_str_max;
 
-const char *bsgs_modes[6] = {"sequential","backward","both","random","dance","ggsb"};
+const char *bsgs_modes[7] = {"sequential","backward","both","random","dance","ggsb","angrygiant"};
 const char *modes[7] = {"xpoint","address","bsgs","rmd160","pub2rmd","minikeys","vanity"};
 const char *cryptos[3] = {"btc","eth","all"};
 const char *publicsearch[3] = {"uncompress","compress","both"};
@@ -471,7 +471,8 @@ int FLAGSKIPCHECKSUM = 0;
 int FLAGENDOMORPHISM = 0;
 
 enum {
-        BSGS_MODE_GGSB = 5
+        BSGS_MODE_GGSB = 5,
+        BSGS_MODE_ANGRY_GIANT = 6
 };
 
 struct BsgsGgsbConfig {
@@ -840,8 +841,8 @@ int main(int argc, char **argv)	{
 				fprintf(stderr,"[W] Skipping checksums on files\n");
 			break;
 			case 'B':
-				index_value = indexOf(optarg,bsgs_modes,6);
-				if(index_value >= 0 && index_value <= 5)	{
+				index_value = indexOf(optarg,bsgs_modes,7);
+				if(index_value >= 0 && index_value <= 6)	{
 					FLAGBSGSMODE = index_value;
 				if(index_value == BSGS_MODE_GGSB){
 					bsgs_ggsb.enabled = true;
@@ -1956,23 +1957,27 @@ free(hextemp);
                        memset(bPtable,0,bytes);
                }
 		
-               if(FLAGLOADPTABLE && bptable_filename){
-                       if(md5_file(bptable_filename, bptable_md5) == 0){
+               if(FLAGLOADPTABLE && bptable_filename && FLAGPTABLECACHE){
+                       char md5_path[4096];
+                       snprintf(md5_path, sizeof(md5_path), "%s.md5", bptable_filename);
+
+                       if(read_md5_file(md5_path, bptable_md5) == 0){
                                FLAGBPTABLEMD5_READY = 1;
-                               char md5_path[4096];
-                               snprintf(md5_path, sizeof(md5_path), "%s.md5", bptable_filename);
+                               printf("[+] bP table MD5 loaded (%s)\n", md5_path);
+                       } else if(md5_file(bptable_filename, bptable_md5) == 0){
+                               FLAGBPTABLEMD5_READY = 1;
                                uint8_t md5_disk[16];
                                if(read_md5_file(md5_path, md5_disk) == 0){
                                        if(memcmp(md5_disk, bptable_md5, 16) == 0){
                                                printf("[+] bP table MD5 verified (%s)\n", md5_path);
-                                       }else{
+                                       } else {
                                                printf("[W] bP table MD5 mismatch (%s); refreshing\n", md5_path);
                                        }
                                }
                                if(write_md5_file(md5_path, bptable_md5) != 0){
                                        fprintf(stderr,"[W] Unable to write bP table MD5 file %s\n", md5_path);
                                }
-                       }else{
+                       } else {
                                fprintf(stderr,"[W] Unable to compute MD5 for bP table %s\n", bptable_filename);
                        }
                }
@@ -2737,6 +2742,10 @@ free(hextemp);
                                         /* GGSB currently reuses the sequential worker */
                                         tid[j] = CreateThread(NULL, 0, thread_process_bsgs, (void*)tt, 0, &s);
                                         break;
+                                case 6:
+                                        /* Angry giant ordering also uses the sequential worker */
+                                        tid[j] = CreateThread(NULL, 0, thread_process_bsgs, (void*)tt, 0, &s);
+                                        break;
                                 }
 #else
                                 case 0:
@@ -2757,7 +2766,11 @@ free(hextemp);
                                 case 5:
                                         /* GGSB currently reuses the sequential worker */
                                         s = pthread_create(&tid[j],NULL,thread_process_bsgs,(void *)tt);
-                                break;
+                                        break;
+                                case 6:
+                                        /* Angry giant ordering also uses the sequential worker */
+                                        s = pthread_create(&tid[j],NULL,thread_process_bsgs,(void *)tt);
+                                        break;
 #endif
                         }
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -4563,11 +4576,13 @@ void *thread_process_bsgs(void *vargp)	{
 	int hLength = (CPU_GRP_SIZE / 2 - 1);
 	grp->Set(dx);
 
-	tt = (struct tothread *)vargp;
-	thread_number = tt->nt;
-	free(tt);
-	
-	cycles = bsgs_aux / 1024;
+tt = (struct tothread *)vargp;
+thread_number = tt->nt;
+free(tt);
+
+const bool angry_giant = (FLAGBSGSMODE == BSGS_MODE_ANGRY_GIANT);
+
+cycles = bsgs_aux / 1024;
 	if(bsgs_aux % 1024 != 0)	{
 		cycles++;
 	}
@@ -4701,47 +4716,152 @@ pn.y.ModMulK1(&_s);
 pn.y.ModAdd(&GSn[i].y);
 #endif
 					pts[0] = pn;
-					for(int i = 0; i<CPU_GRP_SIZE && bsgs_found[k]== 0; i++) {
-						pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
-						r = bloom_check(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
-						if(r) {
-							r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
-							if(r)	{
+
+					if(angry_giant) {
+						unsigned char giant_xpoints[CPU_GRP_SIZE][BSGS_BUFFERXPOINTLENGTH];
+						uint8_t giant_first_byte[CPU_GRP_SIZE];
+						uint32_t giant_bucket_positions[CPU_GRP_SIZE];
+						uint32_t giant_bucket_offsets[257];
+						uint32_t bucket_counts[256] = {0};
+						uint32_t bucket_sizes[256];
+
+						for(int i = 0; i < CPU_GRP_SIZE; i++) {
+							pts[i].x.Get32Bytes(giant_xpoints[i]);
+							uint8_t bucket = giant_xpoints[i][0];
+							giant_first_byte[i] = bucket;
+							bucket_counts[bucket]++;
+						}
+
+						giant_bucket_offsets[0] = 0;
+						for(int bucket = 0; bucket < 256; bucket++) {
+							giant_bucket_offsets[bucket + 1] = giant_bucket_offsets[bucket] + bucket_counts[bucket];
+							bucket_sizes[bucket] = bucket_counts[bucket];
+							bucket_counts[bucket] = 0;
+						}
+
+						for(int i = 0; i < CPU_GRP_SIZE; i++) {
+							uint8_t bucket = giant_first_byte[i];
+							uint32_t pos = giant_bucket_offsets[bucket] + bucket_counts[bucket]++;
+							giant_bucket_positions[pos] = i;
+						}
+
+						uint8_t bucket_order[256];
+						for(int bucket = 0; bucket < 256; bucket++) {
+							bucket_order[bucket] = (uint8_t)bucket;
+						}
+
+						for(int i = 0; i < 255; i++) {
+							for(int j = i + 1; j < 256; j++) {
+								if(bucket_sizes[bucket_order[j]] > bucket_sizes[bucket_order[i]]) {
+									uint8_t tmp = bucket_order[i];
+									bucket_order[i] = bucket_order[j];
+									bucket_order[j] = tmp;
+								}
+							}
+						}
+
+						for(int order_index = 0; order_index < 256 && bsgs_found[k]== 0; order_index++) {
+							uint8_t bucket = bucket_order[order_index];
+							uint32_t start = giant_bucket_offsets[bucket];
+							uint32_t end = giant_bucket_offsets[bucket + 1];
+
+							if(start == end) {
+								continue;
+							}
+
+							struct bloom *primary = &bloom_bP[bucket];
+
+							for(uint32_t pos = start; pos < end && bsgs_found[k]== 0; pos++) {
+								int i = (int)giant_bucket_positions[pos];
+
+								if(!bloom_check(primary,(char*)giant_xpoints[i],BSGS_BUFFERXPOINTLENGTH)) {
+									continue;
+								}
+
+								r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
+								if(r)   {
 								hextemp = keyfound.GetBase16();
-								printf("[+] Thread Key found privkey %s   \n",hextemp);
+								printf("[+] Thread Key found privkey %s   \
+",hextemp);
 								point_found = secp->ComputePublicKey(&keyfound);
 								aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed[k],point_found);
 								printf("[+] Publickey %s\n",aux_c);
-#if defined(_WIN64) && !defined(__CYGWIN__)
+								#if defined(_WIN64) && !defined(__CYGWIN__)
 								WaitForSingleObject(write_keys, INFINITE);
-#else
+								#else
 								pthread_mutex_lock(&write_keys);
-#endif
+								#endif
 
 								filekey = fopen("KEYFOUNDKEYFOUND.txt","a");
-								if(filekey != NULL)	{
+								if(filekey != NULL)     {
 									fprintf(filekey,"Key found privkey %s\nPublickey %s\n",hextemp,aux_c);
 									fclose(filekey);
 								}
 								free(hextemp);
 								free(aux_c);
-#if defined(_WIN64) && !defined(__CYGWIN__)
-				ReleaseMutex(write_keys);
-#else
-				pthread_mutex_unlock(&write_keys);
-#endif
+								#if defined(_WIN64) && !defined(__CYGWIN__)
+								ReleaseMutex(write_keys);
+								#else
+								pthread_mutex_unlock(&write_keys);
+								#endif
+
 								bsgs_found[k] = 1;
 								salir = 1;
-								for(l = 0; l < bsgs_point_number && salir; l++)	{
+								for(l = 0; l < bsgs_point_number && salir; l++) {
 									salir &= bsgs_found[l];
 								}
-								if(salir)	{
+								if(salir)       {
 									printf("All points were found\n");
 									exit(EXIT_FAILURE);
 								}
-							} //End if second check
-						}//End if first check
-					}// For for pts variable
+								}
+							}
+						}
+					} else {
+						for(int i = 0; i<CPU_GRP_SIZE && bsgs_found[k]== 0; i++) {
+							pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
+							r = bloom_check(&bloom_bP[((unsigned char)xpoint_raw[0])],xpoint_raw,32);
+							if(r) {
+								r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
+								if(r)   {
+								hextemp = keyfound.GetBase16();
+								printf("[+] Thread Key found privkey %s   \
+",hextemp);
+								point_found = secp->ComputePublicKey(&keyfound);
+								aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed[k],point_found);
+								printf("[+] Publickey %s\n",aux_c);
+								#if defined(_WIN64) && !defined(__CYGWIN__)
+								WaitForSingleObject(write_keys, INFINITE);
+								#else
+								pthread_mutex_lock(&write_keys);
+								#endif
+
+								filekey = fopen("KEYFOUNDKEYFOUND.txt","a");
+								if(filekey != NULL)     {
+									fprintf(filekey,"Key found privkey %s\nPublickey %s\n",hextemp,aux_c);
+									fclose(filekey);
+								}
+								free(hextemp);
+								free(aux_c);
+								#if defined(_WIN64) && !defined(__CYGWIN__)
+								ReleaseMutex(write_keys);
+								#else
+								pthread_mutex_unlock(&write_keys);
+								#endif
+
+								bsgs_found[k] = 1;
+								salir = 1;
+								for(l = 0; l < bsgs_point_number && salir; l++) {
+									salir &= bsgs_found[l];
+								}
+								if(salir)       {
+									printf("All points were found\n");
+									exit(EXIT_FAILURE);
+								}
+								}
+							}
+						}
+					}
 					// Next start point (startP += (bsSize*GRP_SIZE).G)
 					pp = startP;
 					dy.ModSub(&_2GSn.y,&pp.y);
@@ -6506,7 +6626,7 @@ void sha256sse_23(uint8_t *src0, uint8_t *src1, uint8_t *src2, uint8_t *src3, ui
 void menu() {
 	printf("\nUsage:\n");
 	printf("-h          show this help\n");
-	printf("-B Mode     BSGS modes <sequential, backward, both, random, dance, ggsb>\n");
+   printf("-B Mode     BSGS modes <sequential, backward, both, random, dance, ggsb, angrygiant>\n");
 	printf("-b bits     For some puzzles you only need some numbers of bits in the test keys.\n");
 	printf("-c crypto   Search for specific crypto. <btc, eth> valid only w/ -m address\n");
 	printf("-C mini     Set the minikey Base only 22 character minikeys, ex: SRPqx8QiwnW4WNWnTVa2W5\n");
