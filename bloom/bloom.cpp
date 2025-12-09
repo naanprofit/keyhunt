@@ -38,32 +38,23 @@
 inline static int test_bit_set_bit(struct bloom *bloom, uint64_t bit, int set_bit)
 {
   uint64_t byte = bit >> 3;
+  uint8_t mask = 1 << (bit % 8);
   if (bloom->mapped_chunks > 1 && bloom->bf_chunks) {
     uint64_t chunk = byte / bloom->chunk_bytes;
     uint64_t offset = byte % bloom->chunk_bytes;
     uint8_t *bf = bloom->bf_chunks[chunk];
-    uint8_t c = bf[offset];
-    uint8_t mask = 1 << (bit % 8);
-    if (c & mask) {
-      return 1;
-    } else {
-      if (set_bit) {
-        bf[offset] = c | mask;
-      }
-      return 0;
+    if (!set_bit) {
+      return (bf[offset] & mask) != 0;
     }
+    uint8_t prev = __atomic_fetch_or(&bf[offset], mask, __ATOMIC_RELAXED);
+    return (prev & mask) != 0;
   } else {
     uint8_t *bf = bloom->bf;
-    uint8_t c = bf[byte];
-    uint8_t mask = 1 << (bit % 8);
-    if (c & mask) {
-      return 1;
-    } else {
-      if (set_bit) {
-        bf[byte] = c | mask;
-      }
-      return 0;
+    if (!set_bit) {
+      return (bf[byte] & mask) != 0;
     }
+    uint8_t prev = __atomic_fetch_or(&bf[byte], mask, __ATOMIC_RELAXED);
+    return (prev & mask) != 0;
   }
 }
 
