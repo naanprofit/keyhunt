@@ -50,6 +50,10 @@ email: albertobsd@gmail.com
 #include <sys/stat.h>
 #endif
 
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #include <mach/mach.h>
@@ -719,6 +723,7 @@ int main(int argc, char **argv)	{
 	
        printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
+       opterr = 0;
        int option_index = 0;
        static struct option long_options[] = {
                {"mapped", optional_argument, 0, 0},
@@ -726,9 +731,11 @@ int main(int argc, char **argv)	{
                {"mapped-chunks", required_argument, 0, 0},
                {"bloom-file", required_argument, 0, 0},
                {"load-bloom", no_argument, 0, 0},
+               {"loadbloom", no_argument, 0, 0},
                {"ptable", required_argument, 0, 0},
                {"ptable-size", required_argument, 0, 0},
                {"load-ptable", no_argument, 0, 0},
+               {"loadptable", no_argument, 0, 0},
                {"ptable-cache", no_argument, 0, 0},
                {"bloom-bytes", required_argument, 0, 0},
                {"create-mapped", optional_argument, 0, 0},
@@ -739,7 +746,7 @@ int main(int argc, char **argv)	{
                {0, 0, 0, 0}
        };
 
-       while ((c = getopt_long(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, &option_index)) != -1) {
+       while ((c = getopt_long(argc, argv, ":deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, &option_index)) != -1) {
               if (c == 0) {
                      if (strcmp(long_options[option_index].name, "mapped") == 0) {
                               FLAGMAPPED = 1;
@@ -766,11 +773,13 @@ int main(int argc, char **argv)	{
                               FLAGMAPPED = 1;
                               mapped_chunks = strtoul(optarg, NULL, 10);
                     } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
-                             mapped_filename = optarg;
-                    } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
-                             FLAGLOADBLOOM = 1;
+                              mapped_filename = optarg;
+                      } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
+                              FLAGLOADBLOOM = 1;
+                      } else if (strcmp(long_options[option_index].name, "loadbloom") == 0) {
+                              FLAGLOADBLOOM = 1;
                       } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
-                             bptable_filename = optarg;
+                              bptable_filename = optarg;
                       } else if (strcmp(long_options[option_index].name, "ptable-size") == 0) {
                               char *end;
                               uint64_t desired = strtoull(optarg, &end, 10);
@@ -784,6 +793,8 @@ int main(int argc, char **argv)	{
                               }
                               bptable_size_override = desired;
                       } else if (strcmp(long_options[option_index].name, "load-ptable") == 0) {
+                              FLAGLOADPTABLE = 1;
+                      } else if (strcmp(long_options[option_index].name, "loadptable") == 0) {
                               FLAGLOADPTABLE = 1;
                       } else if (strcmp(long_options[option_index].name, "ptable-cache") == 0) {
                               FLAGPTABLECACHE = 1;
@@ -831,9 +842,30 @@ int main(int argc, char **argv)	{
                       continue;
               }
                switch(c) {
-			case 'h':
-				menu();
-			break;
+                       case '?':
+                       case ':': {
+                               const char *current_opt = (optind > 0 && optind <= argc) ? argv[optind - 1] : NULL;
+                               if (c == ':' && (optopt || current_opt)) {
+                                       if (optopt) {
+                                               fprintf(stderr, "[E] Option -%c requires an argument\n", optopt);
+                                       } else {
+                                               fprintf(stderr, "[E] Option '%s' requires an argument\n", current_opt ? current_opt : "(unknown)");
+                                       }
+                               } else {
+                                       if (optopt) {
+                                               fprintf(stderr, "[E] Unknown option -%c\n", optopt);
+                                       } else if (current_opt) {
+                                               fprintf(stderr, "[E] Unknown option '%s'\n", current_opt);
+                                       } else {
+                                               fprintf(stderr, "[E] Unknown option encountered\n");
+                                       }
+                               }
+                               menu();
+                               break;
+                       }
+                        case 'h':
+                                menu();
+                       break;
 			case '6':
 				FLAGSKIPCHECKSUM = 1;
 				fprintf(stderr,"[W] Skipping checksums on files\n");
@@ -1854,14 +1886,19 @@ free(hextemp);
                        checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
                        memset(bPtable,0,bytes);
 #else
-                       uint64_t map_bytes = bytes;
-                       if(bptable_size_override && bptable_size_override > map_bytes){
-                               map_bytes = bptable_size_override;
+                       uint64_t expected_map_bytes = bytes;
+                       if(bptable_size_override){
+                               if(bptable_size_override < bytes){
+                                       fprintf(stderr,"[E] --ptable-size (%" PRIu64 ") is smaller than required table size (%" PRIu64 ")\n", bptable_size_override, bytes);
+                                       exit(EXIT_FAILURE);
+                               }
+                               expected_map_bytes = bptable_size_override;
                        }
+                       uint64_t map_bytes = expected_map_bytes;
                        const char *fname = bptable_filename;
                        if(fname){
                                if(FLAGLOADPTABLE){
-                                       bptable_fd = open(fname,O_RDONLY);
+                                       bptable_fd = open(fname,O_RDONLY | O_CLOEXEC);
                                        if(bptable_fd < 0){
                                                fprintf(stderr,"[E] Cannot open bP table file\n");
                                                exit(EXIT_FAILURE);
@@ -1871,18 +1908,21 @@ free(hextemp);
                                                fprintf(stderr,"[E] Cannot stat bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
-                                       map_bytes = st.st_size;
-                                       if(map_bytes < bytes){
-                                               fprintf(stderr,"[E] Existing bP table file too small\n");
+                                       uint64_t actual_bytes = st.st_size;
+                                       if(actual_bytes != expected_map_bytes){
+                                               fprintf(stderr,"[E] Existing bP table size mismatch: expected %" PRIu64 " bytes but found %" PRIu64 "\n", expected_map_bytes, actual_bytes);
+                                               fprintf(stderr,"    Recreate the table or adjust --ptable-size.\n");
                                                exit(EXIT_FAILURE);
                                        }
+                                       printf("[+] ptable: LOADING read-only from %s bytes=%" PRIu64 "\n", fname, map_bytes);
                                        FLAGREADEDFILE3 = 1;
                                }else{
-                                       bptable_fd = open(fname,O_RDWR | O_CREAT,0600);
+                                       bptable_fd = open(fname,O_RDWR | O_CREAT | O_CLOEXEC,0600);
                                        if(bptable_fd < 0){
                                                fprintf(stderr,"[E] Cannot create bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
+                                       printf("[+] ptable: CREATING/TRUNCATING %s bytes=%" PRIu64 "\n", fname, map_bytes);
                                        if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
                                                if(ftruncate(bptable_fd,map_bytes) != 0){
                                                        fprintf(stderr,"[E] Cannot resize bP table file\n");
@@ -1902,6 +1942,7 @@ free(hextemp);
                                        fprintf(stderr,"[E] Cannot create bP table file\n");
                                        exit(EXIT_FAILURE);
                                }
+                               printf("[+] ptable: CREATING/TRUNCATING %s bytes=%" PRIu64 "\n", bptable_tmpfile, map_bytes);
                                if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
                                        if(ftruncate(bptable_fd,map_bytes) != 0){
                                                fprintf(stderr,"[E] Cannot resize bP table file\n");
