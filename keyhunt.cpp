@@ -798,13 +798,22 @@ int main(int argc, char **argv)	{
                               FLAGLOADPTABLE = 1;
                       } else if (strcmp(long_options[option_index].name, "ptable-cache") == 0) {
                               FLAGPTABLECACHE = 1;
-                      } else if (strcmp(long_options[option_index].name, "bloom-bytes") == 0) {
-                              FLAGMAPPED = 1;
-                              uint64_t desired = strtoull(optarg, NULL, 10);
-                              uint64_t n; uint32_t k;
-                              bloom_entries_for_bytes(desired, &n, &k);
-                              mapped_entries_override = n;
-                              mapped_error_override = powl(0.5L, (long double)k);
+                     } else if (strcmp(long_options[option_index].name, "bloom-bytes") == 0) {
+                             FLAGMAPPED = 1;
+                             char *end;
+                             uint64_t desired = strtoull(optarg, &end, 10);
+                             if (*end) {
+                                     switch (tolower(*end)) {
+                                             case 'k': desired *= 1024ULL; break;
+                                             case 'm': desired *= 1024ULL * 1024ULL; break;
+                                             case 'g': desired *= 1024ULL * 1024ULL * 1024ULL; break;
+                                             case 't': desired *= 1024ULL * 1024ULL * 1024ULL * 1024ULL; break;
+                                     }
+                             }
+                             uint64_t n; uint32_t k;
+                             bloom_entries_for_bytes(desired, &n, &k);
+                             mapped_entries_override = n;
+                             mapped_error_override = powl(0.5L, (long double)k);
                       } else if (strcmp(long_options[option_index].name, "create-mapped") == 0) {
                               FLAGMAPPED = 1;
                               FLAGCREATEMAPPED = 1;
@@ -842,8 +851,8 @@ int main(int argc, char **argv)	{
                       continue;
               }
                switch(c) {
-                       case '?':
-                       case ':': {
+                      case '?':
+                      case ':': {
                                const char *current_opt = (optind > 0 && optind <= argc) ? argv[optind - 1] : NULL;
                                if (c == ':' && (optopt || current_opt)) {
                                        if (optopt) {
@@ -861,7 +870,7 @@ int main(int argc, char **argv)	{
                                        }
                                }
                                menu();
-                               break;
+                               exit(EXIT_FAILURE);
                        }
                         case 'h':
                                 menu();
@@ -1923,6 +1932,10 @@ free(hextemp);
                                                exit(EXIT_FAILURE);
                                        }
                                        printf("[+] ptable: CREATING/TRUNCATING %s bytes=%" PRIu64 "\n", fname, map_bytes);
+                                       if(ftruncate(bptable_fd, map_bytes) != 0){
+                                               fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                               exit(EXIT_FAILURE);
+                                       }
                                        if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
                                                if(ftruncate(bptable_fd,map_bytes) != 0){
                                                        fprintf(stderr,"[E] Cannot resize bP table file\n");
@@ -1943,6 +1956,10 @@ free(hextemp);
                                        exit(EXIT_FAILURE);
                                }
                                printf("[+] ptable: CREATING/TRUNCATING %s bytes=%" PRIu64 "\n", bptable_tmpfile, map_bytes);
+                               if(ftruncate(bptable_fd, map_bytes) != 0){
+                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                       exit(EXIT_FAILURE);
+                               }
                                if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
                                        if(ftruncate(bptable_fd,map_bytes) != 0){
                                                fprintf(stderr,"[E] Cannot resize bP table file\n");
