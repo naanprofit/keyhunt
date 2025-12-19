@@ -508,6 +508,7 @@ int bptable_fd = -1;
 uint64_t bptable_bytes = 0;
 int FLAGBPTABLEMAPPED = 0;
 int FLAGLOADPTABLE = 0;
+int FLAGFORCEPTABLEREBUILD = 0;
 int FLAGPTABLECACHE = 0;
 uint64_t bptable_cache_boundaries[257];
 int FLAGBPTABLECACHE_READY = 0;
@@ -737,6 +738,7 @@ int main(int argc, char **argv)	{
                {"load-ptable", no_argument, 0, 0},
                {"loadptable", no_argument, 0, 0},
                {"ptable-cache", no_argument, 0, 0},
+               {"force-ptable-rebuild", no_argument, 0, 0},
                {"bloom-bytes", required_argument, 0, 0},
                {"create-mapped", optional_argument, 0, 0},
                {"tmpdir", required_argument, 0, 0},
@@ -798,6 +800,8 @@ int main(int argc, char **argv)	{
                               FLAGLOADPTABLE = 1;
                       } else if (strcmp(long_options[option_index].name, "ptable-cache") == 0) {
                               FLAGPTABLECACHE = 1;
+                      } else if (strcmp(long_options[option_index].name, "force-ptable-rebuild") == 0) {
+                              FLAGFORCEPTABLEREBUILD = 1;
                      } else if (strcmp(long_options[option_index].name, "bloom-bytes") == 0) {
                              FLAGMAPPED = 1;
                              char *end;
@@ -1905,6 +1909,24 @@ free(hextemp);
                        }
                        uint64_t map_bytes = expected_map_bytes;
                        const char *fname = bptable_filename;
+                       struct stat st_existing;
+                       bool have_existing_ptable = false;
+                       if(fname && stat(fname, &st_existing) == 0){
+                               have_existing_ptable = true;
+                               /* Avoid silently clobbering a populated table when users forget --load-ptable. */
+                               if(st_existing.st_size > 0 && !FLAGLOADPTABLE && !FLAGFORCEPTABLEREBUILD){
+                                       if((uint64_t)st_existing.st_size != expected_map_bytes){
+                                               fprintf(stderr,
+                                                       "[E] Existing bP table size mismatch: expected %" PRIu64 " bytes but found %jd in %s\n",
+                                                       expected_map_bytes, (intmax_t)st_existing.st_size, fname);
+                                               fprintf(stderr,
+                                                       "    Use matching -n/-k or --ptable-size, or rebuild explicitly with --force-ptable-rebuild.\n");
+                                               exit(EXIT_FAILURE);
+                                       }
+                                       printf("[i] ptable: existing file %s detected; enabling --load-ptable (use --force-ptable-rebuild to overwrite)\n", fname);
+                                       FLAGLOADPTABLE = 1;
+                               }
+                       }
                        if(fname){
                                if(FLAGLOADPTABLE){
                                        bptable_fd = open(fname,O_RDONLY | O_CLOEXEC);
@@ -1931,16 +1953,21 @@ free(hextemp);
                                                fprintf(stderr,"[E] Cannot create bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
-                                       printf("[+] ptable: CREATING/TRUNCATING %s bytes=%" PRIu64 "\n", fname, map_bytes);
-                                       if(ftruncate(bptable_fd, map_bytes) != 0){
-                                               fprintf(stderr,"[E] Cannot resize bP table file\n");
-                                               exit(EXIT_FAILURE);
-                                       }
-                                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
-                                               if(ftruncate(bptable_fd,map_bytes) != 0){
+                                       if(!have_existing_ptable || st_existing.st_size == 0 || FLAGFORCEPTABLEREBUILD){
+                                               const char *action = (!have_existing_ptable || st_existing.st_size == 0) ? "CREATING" : "REBUILDING";
+                                               printf("[+] ptable: %s/TRUNCATING %s bytes=%" PRIu64 "\n", action, fname, map_bytes);
+                                               if(ftruncate(bptable_fd, map_bytes) != 0){
                                                        fprintf(stderr,"[E] Cannot resize bP table file\n");
                                                        exit(EXIT_FAILURE);
                                                }
+                                               if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                                                       if(ftruncate(bptable_fd,map_bytes) != 0){
+                                                               fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                                               exit(EXIT_FAILURE);
+                                                       }
+                                               }
+                                       }else{
+                                               printf("[+] ptable: USING existing %s bytes=%" PRIu64 "\n", fname, map_bytes);
                                        }
                                }
                        }else{
@@ -6667,11 +6694,12 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
 	printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
 	printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
 	printf("--load-bloom       Require existing mapped bloom file; do not create a new one\n");
-	printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
-	printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
-	printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
-	printf("--ptable-cache   Enable cached lookup metadata for the mapped bP table when using --load-ptable\n");
-	printf("--tmpdir dir     Directory for temporary files\n");
+        printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
+        printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
+        printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
+        printf("--force-ptable-rebuild  Overwrite any existing bP table file when creating mapped tables\n");
+        printf("--ptable-cache   Enable cached lookup metadata for the mapped bP table when using --load-ptable\n");
+        printf("--tmpdir dir     Directory for temporary files\n");
 	printf("\nValid n and maximum k values:\n");
         print_nk_table();
         printf("\nExample:\n\n");
