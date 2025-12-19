@@ -4583,40 +4583,58 @@ void bsgs_myheapsort(struct bsgs_xvalue	*arr, int64_t n)	{
 }
 
 int bsgs_searchbinary(struct bsgs_xvalue *buffer,char *data,int64_t array_length,uint64_t *r_value) {
-        int64_t min,max,half,current;
-        int r = 0,rcmp;
-        min = 0;
-        current = 0;
-        max = array_length;
-        if(FLAGBPTABLECACHE_READY){
-                uint8_t bucket = (uint8_t)data[16];
-                min = (int64_t)bptable_cache_boundaries[bucket];
-                max = (int64_t)bptable_cache_boundaries[bucket + 1];
-                current = min;
-                if(max <= min){
-                        return 0;
-                }
-        }
-        half = max - min;
-        while(!r && half >= 1) {
-                half = (max - min)/2;
-                rcmp = memcmp(data+16,buffer[current+half].value,BSGS_XVALUE_RAM);
-		if(rcmp == 0)	{
-			*r_value = buffer[current+half].index;
-			r = 1;
-		}
-		else	{
-			if(rcmp < 0) {
-				max = (max-half);
-			}
-			else	{
-				min = (min+half);
-			}
-			current = min;
+	if(array_length <= 0){
+		return 0;
+	}
+
+	const unsigned char *target = (unsigned char *)(data + 16);
+	int64_t lo = 0;
+	int64_t hi = array_length;
+
+	if(FLAGBPTABLECACHE_READY){
+		uint8_t bucket = (uint8_t)data[16];
+		lo = (int64_t)bptable_cache_boundaries[bucket];
+		hi = (int64_t)bptable_cache_boundaries[bucket + 1];
+		if(hi <= lo){
+			return 0;
 		}
 	}
-	return r;
+
+	while(lo < hi){
+		int64_t mid = lo + ((hi - lo) / 2);
+		int cmp = memcmp(buffer[mid].value, target, BSGS_XVALUE_RAM);
+		if(cmp < 0){
+			lo = mid + 1;
+		} else {
+			hi = mid;
+		}
+	}
+
+	if(lo >= array_length){
+		return 0;
+	}
+
+	if(memcmp(buffer[lo].value, target, BSGS_XVALUE_RAM) != 0){
+		return 0;
+	}
+
+	/* Scan neighbors to make sure we don’t miss duplicates/collisions */
+	int64_t best = lo;
+	int64_t left = lo - 1;
+	while(left >= 0 && memcmp(buffer[left].value, target, BSGS_XVALUE_RAM) == 0){
+		best = left;
+		left--;
+	}
+	int64_t right = lo + 1;
+	while(right < array_length && memcmp(buffer[right].value, target, BSGS_XVALUE_RAM) == 0){
+		right++;
+	}
+
+	/* Return the first match; callers may iterate candidates in-range if needed */
+	*r_value = buffer[best].index;
+	return 1;
 }
+
 
 #if defined(_WIN64) && !defined(__CYGWIN__)
 DWORD WINAPI thread_process_bsgs(LPVOID vargp) {
