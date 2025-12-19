@@ -138,7 +138,7 @@ void bsgs_swap(struct bsgs_xvalue *a,struct bsgs_xvalue *b);
 void bsgs_heapify(struct bsgs_xvalue *arr, int64_t n, int64_t i);
 int64_t bsgs_partition(struct bsgs_xvalue *arr, int64_t n);
 
-int bsgs_searchbinary(struct bsgs_xvalue *arr,char *data,int64_t array_length,uint64_t *r_value);
+int bsgs_searchbinary(struct bsgs_xvalue *arr,char *data,int64_t array_length,uint64_t *range_start,uint64_t *range_end);
 int bsgs_secondcheck(Int *start_range,uint32_t a,Int *privatekey);
 int bsgs_thirdcheck(Int *start_range,uint32_t a,Int *privatekey);
 
@@ -2464,40 +2464,57 @@ void bsgs_myheapsort(struct bsgs_xvalue	*arr, int64_t n)	{
 	}
 }
 
-int bsgs_searchbinary(struct bsgs_xvalue *buffer,char *data,int64_t array_length,uint64_t *r_value) {
-        int64_t min,max,half,current;
-        int r = 0,rcmp;
-        min = 0;
-        current = 0;
-        max = array_length;
+int bsgs_searchbinary(struct bsgs_xvalue *buffer,char *data,int64_t array_length,uint64_t *range_start,uint64_t *range_end) {
+        if(array_length <= 0){
+                return 0;
+        }
+
+        const unsigned char *target = (unsigned char *)(data + 16);
+        int64_t lo = 0;
+        int64_t hi = array_length;
+
         if(FLAGBPTABLECACHE_READY){
                 uint8_t bucket = (uint8_t)data[16];
-                min = (int64_t)bptable_cache_boundaries[bucket];
-                max = (int64_t)bptable_cache_boundaries[bucket + 1];
-                current = min;
-                if(max <= min){
+                lo = (int64_t)bptable_cache_boundaries[bucket];
+                hi = (int64_t)bptable_cache_boundaries[bucket + 1];
+                if(hi <= lo){
                         return 0;
                 }
+                if(hi > array_length){
+                        hi = array_length;
+                }
         }
-        half = max - min;
-        while(!r && half >= 1) {
-                half = (max - min)/2;
-                rcmp = memcmp(data+16,buffer[current+half].value,BSGS_XVALUE_RAM);
-		if(rcmp == 0)	{
-			*r_value = buffer[current+half].index;
-			r = 1;
-		}
-		else	{
-			if(rcmp < 0) {
-				max = (max-half);
-			}
-			else	{
-				min = (min+half);
-			}
-			current = min;
-		}
-	}
-	return r;
+
+        while(lo < hi){
+                int64_t mid = lo + ((hi - lo) / 2);
+                int cmp = memcmp(buffer[mid].value, target, BSGS_XVALUE_RAM);
+                if(cmp < 0){
+                        lo = mid + 1;
+                } else {
+                        hi = mid;
+                }
+        }
+
+        if(lo >= array_length){
+                return 0;
+        }
+
+        if(memcmp(buffer[lo].value, target, BSGS_XVALUE_RAM) != 0){
+                return 0;
+        }
+
+        int64_t left = lo;
+        while(left - 1 >= 0 && memcmp(buffer[left - 1].value, target, BSGS_XVALUE_RAM) == 0){
+                left--;
+        }
+        int64_t right = lo;
+        while(right + 1 < array_length && memcmp(buffer[right + 1].value, target, BSGS_XVALUE_RAM) == 0){
+                right++;
+        }
+
+        *range_start = buffer[left].index;
+        *range_end = buffer[right].index;
+        return (int)(right - left + 1);
 }
 
 void *thread_process_bsgs(void *vargp)	{
@@ -2851,7 +2868,7 @@ int bsgs_secondcheck(Int *start_range,uint32_t a,Int *privatekey)	{
 }
 
 int bsgs_thirdcheck(Int *start_range,uint32_t a,Int *privatekey)	{
-	uint64_t j = 0;
+	uint64_t j_start = 0, j_end = 0;
 	int i = 0,found = 0,r = 0;
 	Int base_key,calculatedkey;
 	Point base_point,point_aux;
@@ -2874,19 +2891,20 @@ int bsgs_thirdcheck(Int *start_range,uint32_t a,Int *privatekey)	{
 		BSGS_S.x.Get32Bytes((unsigned char *)xpoint_raw);
 		r = bloom_check(&bloom_bPx3rd[(uint8_t)xpoint_raw[0]],xpoint_raw,32);
 		if(r)	{
-			r = bsgs_searchbinary(bPtable,xpoint_raw,bsgs_m3,&j);
+			r = bsgs_searchbinary(bPtable,xpoint_raw,bsgs_m3,&j_start,&j_end);
 			if(r)	{
-				calcualteindex(i,&calculatedkey);
-				privatekey->Set(&calculatedkey);
-				privatekey->Add((uint64_t)(j+1));
-				privatekey->Add(&base_key);
-				
-				point_aux = secp->ComputePublicKey(privatekey);
-				
-				if(point_aux.x.IsEqual(&OriginalPointsBSGS.x))	{
-					found = 1;
-				}
-				else	{
+				for(uint64_t j = j_start; j <= j_end && !found; j++){
+					calcualteindex(i,&calculatedkey);
+					privatekey->Set(&calculatedkey);
+					privatekey->Add((uint64_t)(j+1));
+					privatekey->Add(&base_key);
+					
+					point_aux = secp->ComputePublicKey(privatekey);
+					
+					if(point_aux.x.IsEqual(&OriginalPointsBSGS.x))	{
+						found = 1;
+						break;
+					}
 					calcualteindex(i,&calculatedkey);
 					privatekey->Set(&calculatedkey);
 					privatekey->Sub((uint64_t)(j+1));
