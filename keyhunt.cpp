@@ -578,9 +578,9 @@ uint64_t BSGS_BUFFERREGISTERLENGTH = 36;
 /*
 BSGS Variables
 */
-int *bsgs_found;
+std::vector<int> bsgs_found;
 std::vector<Point> OriginalPointsBSGS;
-bool *OriginalPointsBSGScompressed;
+std::vector<bool> OriginalPointsBSGScompressed;
 
 uint64_t bytes;
 char checksum[32],checksum_backup[32];
@@ -750,10 +750,15 @@ int main(int argc, char **argv)	{
 
        opterr = 0;
        int option_index = 0;
+       int mapped_sizing_opts = 0;
        static struct option long_options[] = {
                {"mapped", optional_argument, 0, 0},
                {"mapped-size", required_argument, 0, 0},
                {"mapped-chunks", required_argument, 0, 0},
+               {"mapped-dir", required_argument, 0, 0},
+               {"mapped-error", required_argument, 0, 0},
+               {"mapped-bpe", required_argument, 0, 0},
+               {"mapped-plan", no_argument, 0, 0},
                {"bloom-file", required_argument, 0, 0},
                {"load-bloom", no_argument, 0, 0},
                {"loadbloom", no_argument, 0, 0},
@@ -774,7 +779,7 @@ int main(int argc, char **argv)	{
 
        while ((c = getopt_long(argc, argv, ":deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, &option_index)) != -1) {
               if (c == 0) {
-                     if (strcmp(long_options[option_index].name, "mapped") == 0) {
+                      if (strcmp(long_options[option_index].name, "mapped") == 0) {
                               FLAGMAPPED = 1;
                               if (optarg) {
                                       mapped_filename = optarg;
@@ -795,10 +800,24 @@ int main(int argc, char **argv)	{
                               bloom_entries_for_bytes(desired, &n, &k);
                               mapped_entries_override = n;
                               mapped_error_override = powl(0.5L, (long double)k);
+                              mapped_sizing_opts++;
                       } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
                               FLAGMAPPED = 1;
                               mapped_chunks = strtoul(optarg, NULL, 10);
-                    } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
+                     } else if (strcmp(long_options[option_index].name, "mapped-dir") == 0) {
+                             mapped_dir = optarg;
+                     } else if (strcmp(long_options[option_index].name, "mapped-error") == 0) {
+                             FLAGMAPPED = 1;
+                             mapped_error_override = strtold(optarg, NULL);
+                             mapped_sizing_opts++;
+                     } else if (strcmp(long_options[option_index].name, "mapped-bpe") == 0) {
+                             FLAGMAPPED = 1;
+                             mapped_bpe_override = strtold(optarg, NULL);
+                             mapped_error_override = powl(0.6185L, mapped_bpe_override);
+                             mapped_sizing_opts++;
+                     } else if (strcmp(long_options[option_index].name, "mapped-plan") == 0) {
+                             FLAGMAPPEDPLAN = 1;
+                      } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
                               mapped_filename = optarg;
                       } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
                               FLAGLOADBLOOM = 1;
@@ -842,6 +861,7 @@ int main(int argc, char **argv)	{
                              bloom_entries_for_bytes(desired, &n, &k);
                              mapped_entries_override = n;
                              mapped_error_override = powl(0.5L, (long double)k);
+                             mapped_sizing_opts++;
                       } else if (strcmp(long_options[option_index].name, "create-mapped") == 0) {
                               FLAGMAPPED = 1;
                               FLAGCREATEMAPPED = 1;
@@ -851,6 +871,7 @@ int main(int argc, char **argv)	{
                                       bloom_entries_for_bytes(desired, &n, &k);
                                       mapped_entries_override = n;
                                       mapped_error_override = powl(0.5L, (long double)k);
+                                      mapped_sizing_opts++;
                               }
                       } else if (strcmp(long_options[option_index].name, "tmpdir") == 0) {
                               tmpdir_path = optarg;
@@ -1192,10 +1213,15 @@ int main(int argc, char **argv)	{
                }
        }
 
-       if (FLAGLOADPTABLE && !bptable_filename) {
-               fprintf(stderr, "--load-ptable requires --ptable <file>\n");
-               exit(EXIT_FAILURE);
-       }
+if (FLAGLOADPTABLE && !bptable_filename) {
+fprintf(stderr, "--load-ptable requires --ptable <file>\n");
+exit(EXIT_FAILURE);
+}
+
+if(mapped_sizing_opts > 1){
+fprintf(stderr,"[E] Choose only one of --mapped-size, --bloom-bytes, --mapped-error, or --mapped-bpe.\n");
+exit(EXIT_FAILURE);
+}
 
        if (FLAGCREATEMAPPED) {
                if (!mapped_entries_override) {
@@ -1441,74 +1467,64 @@ int main(int argc, char **argv)	{
 			exit(EXIT_FAILURE);
 		}
 		aux = (char*) malloc(1024);
-		checkpointer((void *)aux,__FILE__,"malloc","aux" ,__LINE__ - 1);
-		while(!feof(fd))	{
-			if(fgets(aux,1022,fd) == aux)	{
-				trim(aux," \t\n\r");
-				if(strlen(aux) >= 128)	{	//Length of a full address in hexadecimal without 04
-						N++;
-				}else	{
-					if(strlen(aux) >= 66)	{
-						N++;
-					}
-				}
-			}
-		}
-		if(N == 0)	{
-			fprintf(stderr,"[E] There is no valid data in the file\n");
-			exit(EXIT_FAILURE);
-		}
-		bsgs_found = (int*) calloc(N,sizeof(int));
-		checkpointer((void *)bsgs_found,__FILE__,"calloc","bsgs_found" ,__LINE__ -1 );
-		OriginalPointsBSGS.reserve(N);
-		OriginalPointsBSGScompressed = (bool*) malloc(N*sizeof(bool));
-		checkpointer((void *)OriginalPointsBSGScompressed,__FILE__,"malloc","OriginalPointsBSGScompressed" ,__LINE__ -1 );
-		pointx_str = (char*) malloc(65);
-		checkpointer((void *)pointx_str,__FILE__,"malloc","pointx_str" ,__LINE__ -1 );
-		pointy_str = (char*) malloc(65);
-		checkpointer((void *)pointy_str,__FILE__,"malloc","pointy_str" ,__LINE__ -1 );
-		fseek(fd,0,SEEK_SET);
-		i = 0;
-		while(!feof(fd))	{
-			if(fgets(aux,1022,fd) == aux)	{
-				trim(aux," \t\n\r");
-				if(strlen(aux) >= 66)	{
-					stringtokenizer(aux,&tokenizerbsgs);
-					aux2 = nextToken(&tokenizerbsgs);
-					memset(pointx_str,0,65);
-					memset(pointy_str,0,65);
-					switch(strlen(aux2))	{
-						case 66:	//Compress
+                checkpointer((void *)aux,__FILE__,"malloc","aux" ,__LINE__ - 1);
+                Point point_aux;
+                uint64_t counted = 0;
+                while(fgets(aux,1022,fd) == aux) {
+                        trim(aux," \t\n\r");
+                        size_t len = strlen(aux);
+                        if(len >= 66) {
+                                counted++;
+                        }
+                }
+                if(counted == 0)        {
+                        fprintf(stderr,"[E] There is no valid data in the file\n");
+                        exit(EXIT_FAILURE);
+                }
+                bsgs_found.assign(counted,0);
+                OriginalPointsBSGS.clear();
+                OriginalPointsBSGScompressed.clear();
+                OriginalPointsBSGS.reserve(counted);
+                OriginalPointsBSGScompressed.reserve(counted);
+                pointx_str = (char*) malloc(65);
+                checkpointer((void *)pointx_str,__FILE__,"malloc","pointx_str" ,__LINE__ -1 );
+                pointy_str = (char*) malloc(65);
+                checkpointer((void *)pointy_str,__FILE__,"malloc","pointy_str" ,__LINE__ -1 );
+                fseek(fd,0,SEEK_SET);
+                i = 0;
+                while(fgets(aux,1022,fd) == aux) {
+                        trim(aux," \t\n\r");
+                        size_t len = strlen(aux);
+                        if(len >= 66)   {
+                                stringtokenizer(aux,&tokenizerbsgs);
+                                aux2 = nextToken(&tokenizerbsgs);
+                                memset(pointx_str,0,65);
+                                memset(pointy_str,0,65);
+                                bool isCompressed = false;
+                                bool parsed = false;
+                                switch(strlen(aux2))    {
+                                        case 66:        //Compress
+                                                parsed = secp->ParsePublicKeyHex(aux2,point_aux,isCompressed);
+                                        break;
+                                        case 130:       //With the 04
+                                                parsed = secp->ParsePublicKeyHex(aux2,point_aux,isCompressed);
+                                        break;
+                                        default:
+                                                printf("Invalid length: %s\n",aux2);
+                                        break;
+                                }
+                                if(parsed) {
+                                        OriginalPointsBSGS.push_back(point_aux);
+                                        OriginalPointsBSGScompressed.push_back(isCompressed);
+                                        i++;
+                                }
+                                freetokenizer(&tokenizerbsgs);
+                        }
+                }
+                fclose(fd);
+                bsgs_point_number = (uint32_t)OriginalPointsBSGS.size();
+                bsgs_found.assign(bsgs_point_number,0);
 
-							if(secp->ParsePublicKeyHex(aux2,OriginalPointsBSGS[i],OriginalPointsBSGScompressed[i]))	{
-								i++;
-							}
-							else	{
-								N--;
-							}
-
-						break;
-						case 130:	//With the 04
-
-							if(secp->ParsePublicKeyHex(aux2,OriginalPointsBSGS[i],OriginalPointsBSGScompressed[i]))	{
-								i++;
-							}
-							else	{
-								N--;
-							}
-
-						break;
-						default:
-							printf("Invalid length: %s\n",aux2);
-							N--;
-						break;
-					}
-					freetokenizer(&tokenizerbsgs);
-				}
-			}
-		}
-		fclose(fd);
-		bsgs_point_number = N;
 		if(bsgs_point_number > 0)	{
 			printf("[+] Added %u points from file\n",bsgs_point_number);
 		}
