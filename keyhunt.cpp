@@ -910,9 +910,13 @@ int main(int argc, char **argv)	{
                               mapped_entries_override = n;
                               mapped_error_override = powl(0.5L, (long double)k);
                               mapped_sizing_opts++;
-                      } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
-                              FLAGMAPPED = 1;
-                              mapped_chunks = strtoul(optarg, NULL, 10);
+                     } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
+                             FLAGMAPPED = 1;
+                             mapped_chunks = strtoul(optarg, NULL, 10);
+                             if (mapped_chunks == 0) {
+                                     fprintf(stderr, "[W] Invalid --mapped-chunks value %s, forcing 1.\n", optarg);
+                                     mapped_chunks = 1;
+                             }
                      } else if (strcmp(long_options[option_index].name, "mapped-dir") == 0) {
                              mapped_dir = optarg;
                      } else if (strcmp(long_options[option_index].name, "mapped-error") == 0) {
@@ -1844,6 +1848,9 @@ free(hextemp);
 			itemsbloom3 = 1000;
 		}
 		
+                if (mapped_chunks == 0) {
+                        mapped_chunks = 1;
+                }
                 long double bloom_error = mapped_error_override ? mapped_error_override : 0.000001L;
                 uint64_t shard_bytes = bloom_bytes_for_entries_error(itemsbloom, bloom_error);
                 double shard_mb = (double)shard_bytes / 1048576.0;
