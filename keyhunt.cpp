@@ -13,6 +13,8 @@ email: albertobsd@gmail.com
 #include <atomic>
 #include <new>
 #include <string>
+#include <sstream>
+#include <limits>
 #include <inttypes.h>
 #include <errno.h>
 #include <ctype.h>
@@ -543,6 +545,113 @@ const char *tmpdir_path = NULL;
 int KFACTOR = 1;
 int MAXLENGTHADDRESS = -1;
 int NTHREADS = 1;
+
+static std::string path_dirname(const std::string &input) {
+        size_t pos = input.find_last_of("/\\");
+        if (pos == std::string::npos) {
+                return std::string();
+        }
+        if (pos == 0) {
+                return std::string("/");
+        }
+        return input.substr(0, pos);
+}
+
+static std::string path_basename(const std::string &input) {
+        size_t pos = input.find_last_of("/\\");
+        if (pos == std::string::npos) {
+                return input;
+        }
+        return input.substr(pos + 1);
+}
+
+static bool ensure_directory_exists(const std::string &dir, bool readonly) {
+        if (dir.empty()) {
+                return true;
+        }
+        struct stat st;
+        if (stat(dir.c_str(), &st) == 0) {
+                if (S_ISDIR(st.st_mode)) {
+                        return true;
+                }
+                fprintf(stderr, "[E] Path %s exists but is not a directory.\n", dir.c_str());
+                return false;
+        }
+        if (readonly) {
+                fprintf(stderr, "[E] Directory %s does not exist and read-only mode is enabled.\n", dir.c_str());
+                return false;
+        }
+        std::string partial;
+        for (size_t i = 0; i < dir.size(); i++) {
+                partial.push_back(dir[i]);
+                if (dir[i] == '/' || dir[i] == '\\') {
+                        if (partial.size() == 1 && partial[0] == '/') {
+                                continue;
+                        }
+                        mkdir(partial.c_str(), 0755);
+                }
+        }
+        if (mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) {
+                fprintf(stderr, "[E] Unable to create directory %s: %s\n", dir.c_str(), strerror(errno));
+                return false;
+        }
+        return true;
+}
+
+static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix) {
+        std::string mf = mapped_filename ? mapped_filename : "";
+        bool ends_with_sep = (!mf.empty() && (mf.back() == '/' || mf.back() == '\\'));
+        std::string mf_dir;
+        std::string mf_body;
+        if (!mf.empty()) {
+                if (ends_with_sep) {
+                        mf_dir = mf.substr(0, mf.size() - 1);
+                } else {
+                        mf_dir = path_dirname(mf);
+                        mf_body = path_basename(mf);
+                }
+        }
+
+        std::string dir;
+        if (mapped_dir && *mapped_dir) {
+                dir = mapped_dir;
+        } else if (!mf_dir.empty()) {
+                dir = mf_dir;
+        } else if (tmpdir_path && *tmpdir_path) {
+                dir = tmpdir_path;
+        } else {
+                dir = ".";
+        }
+        if (!dir.empty() && dir.back() == '/') {
+                dir.pop_back();
+        }
+
+        char label[64];
+        snprintf(label, sizeof(label), "layer%u-%03u", layer, bucket);
+        bool has_placeholder = (!mf_body.empty() && mf_body.find("%s") != std::string::npos);
+        std::string shard_name;
+        if (has_placeholder) {
+                char buf[1024];
+                snprintf(buf, sizeof(buf), mf_body.c_str(), label);
+                shard_name = buf;
+        } else if (!mf_body.empty()) {
+                shard_name = mf_body + "." + label + ".dat";
+        } else {
+                shard_name = std::string(fallback_prefix) + "." + label + ".dat";
+        }
+
+        bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
+        if (!ensure_directory_exists(dir, readonly)) {
+                exit(EXIT_FAILURE);
+        }
+
+        std::string fullpath = dir;
+        if (!fullpath.empty() && fullpath.back() != '/') {
+                fullpath.push_back('/');
+        }
+        fullpath += shard_name;
+        return fullpath;
+}
 
 int FLAGSAVEREADFILE = 0;
 int FLAGREADEDFILE1 = 0;
@@ -1739,6 +1848,58 @@ free(hextemp);
                 uint64_t shard_bytes = bloom_bytes_for_entries_error(itemsbloom, bloom_error);
                 double shard_mb = (double)shard_bytes / 1048576.0;
                 double layer_total_mb = shard_mb * 256.0;
+                uint64_t projected_files = (uint64_t)mapped_chunks * 256ULL * 3ULL;
+                if (projected_files > 8192ULL) {
+                        fprintf(stderr, "[E] Refusing to create %" PRIu64 " bloom chunk files (mapped-chunks=%u). Reduce --mapped-chunks or consolidate mapping.\n",
+                                projected_files, (unsigned)mapped_chunks);
+                        exit(EXIT_FAILURE);
+                }
+
+                if (FLAGMAPPEDPLAN) {
+                        auto print_plan_row = [](const char *label, uint64_t items, long double target_error) {
+                                long double bpe = (-logl(target_error)) / 0.480453013918201L;
+                                uint8_t hashes = (uint8_t)ceill(0.693147180559945L * bpe);
+                                long double bits = bpe * (long double)items;
+                                uint64_t bytes = (uint64_t)(bits / 8.0L);
+                                if (fmodl(bits, 8.0L) > 0.0L) {
+                                        bytes += 1;
+                                }
+                                long double achieved = powl(1 - expl(-(long double)hashes * (long double)items / (long double)(bytes * 8ULL)), hashes);
+                                printf("    %-12s items=%" PRIu64 " hashes=%u bpe=%.2Lf err~=%.1Le shard_bytes=%.2Lf total_bytes=%.2Lf\n",
+                                       label,
+                                       items,
+                                       hashes,
+                                       bpe,
+                                       achieved,
+                                       (long double)bytes / 1048576.0L,
+                                       ((long double)bytes * 256.0L) / 1048576.0L);
+                        };
+
+                        printf("[plan] Mode: BSGS mapped bloom planning\n");
+                        char *n_hex = BSGS_N.GetBase16();
+                        printf("[plan] N=0x%s k=%u M=%" PRIu64 " M2=%" PRIu64 " M3=%" PRIu64 " block-count=%" PRIu64 "\n",
+                               n_hex, KFACTOR, (uint64_t)bsgs_m, (uint64_t)bsgs_m2, (uint64_t)bsgs_m3, (uint64_t)bsgs_ggsb.block_count);
+                        free(n_hex);
+                        printf("[plan] Items per shard: L1=%" PRIu64 " L2=%" PRIu64 " L3=%" PRIu64 "\n", itemsbloom, itemsbloom2, itemsbloom3);
+                        long double errors[] = {1e-3L, 1e-4L, 1e-6L, 1e-8L};
+                        long double bpes[] = {8L, 10L, 12L, 14L, 16L, 20L, 28L, 43L};
+                        printf("[plan] Common error targets:\n");
+                        for (size_t idx = 0; idx < sizeof(errors)/sizeof(errors[0]); idx++) {
+                                print_plan_row("L1", itemsbloom, errors[idx]);
+                                print_plan_row("L2", itemsbloom2, errors[idx]);
+                                print_plan_row("L3", itemsbloom3, errors[idx]);
+                        }
+                        printf("[plan] Common bits-per-entry:\n");
+                        for (size_t idx = 0; idx < sizeof(bpes)/sizeof(bpes[0]); idx++) {
+                                long double err = powl(0.6185L, bpes[idx]);
+                                print_plan_row("L1", itemsbloom, err);
+                                print_plan_row("L2", itemsbloom2, err);
+                                print_plan_row("L3", itemsbloom3, err);
+                        }
+                        long double recommended = mapped_error_override ? mapped_error_override : 1e-6L;
+                        printf("[plan] Recommended default error=%.1Le (balanced speed vs disk)\n", recommended);
+                        exit(EXIT_SUCCESS);
+                }
 
                 uint64_t effective_blocks = (bsgs_ggsb.enabled && bsgs_ggsb.block_count)
                         ? bsgs_ggsb.block_count
@@ -1758,6 +1919,10 @@ free(hextemp);
                 fprintf(stderr,
                         "[i] Expected sizes: each bloom layer ~%.2f MB (256 shards), bPtable ~%.2f MB per block (%.2f MB total).\n",
                         layer_total_mb, ptable_mb, ptable_total_mb);
+
+                std::string bloom_preview = build_bloom_shard_path(1, 0, "bloom");
+                std::string bloom_dir = path_dirname(bloom_preview);
+                printf("[i] Bloom shards will be stored under %s (example: %s)\n", bloom_dir.c_str(), bloom_preview.c_str());
 
                 printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m);
 		bloom_bP = (struct bloom*)calloc(256,sizeof(struct bloom));
@@ -1782,9 +1947,8 @@ free(hextemp);
 #else
 			pthread_mutex_init(&bloom_bP_mutex[i],NULL);
 #endif
-                        char fname[32];
-                        snprintf(fname, sizeof(fname), "bloom-%u.dat", (unsigned)i);
-                        if(!initBloomFilterMapped(&bloom_bP[i],itemsbloom,fname)){
+                        std::string fname = build_bloom_shard_path(1, i, "bloom");
+                        if(!initBloomFilterMapped(&bloom_bP[i],itemsbloom,fname.c_str())){
                                 fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
                                 exit(EXIT_FAILURE);
                         }
@@ -1813,9 +1977,8 @@ free(hextemp);
 #else
 			pthread_mutex_init(&bloom_bPx2nd_mutex[i],NULL);
 #endif
-                        char fname2[32];
-                        snprintf(fname2, sizeof(fname2), "bloom2-%u.dat", (unsigned)i);
-                        if(!initBloomFilterMapped(&bloom_bPx2nd[i],itemsbloom2,fname2)){
+                        std::string fname2 = build_bloom_shard_path(2, i, "bloom2");
+                        if(!initBloomFilterMapped(&bloom_bPx2nd[i],itemsbloom2,fname2.c_str())){
                                 fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
                                 exit(EXIT_FAILURE);
                         }
@@ -1844,9 +2007,8 @@ free(hextemp);
 #else
 			pthread_mutex_init(&bloom_bPx3rd_mutex[i],NULL);
 #endif
-                        char fname3[32];
-                        snprintf(fname3, sizeof(fname3), "bloom3-%u.dat", (unsigned)i);
-                        if(!initBloomFilterMapped(&bloom_bPx3rd[i],itemsbloom3,fname3)){
+                        std::string fname3 = build_bloom_shard_path(3, i, "bloom3");
+                        if(!initBloomFilterMapped(&bloom_bPx3rd[i],itemsbloom3,fname3.c_str())){
                                 fprintf(stderr,"[E] error bloom_init [%" PRIu64 "]\n",i);
                                 exit(EXIT_FAILURE);
                         }
@@ -6748,12 +6910,16 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
 	printf("--rmd-batch-size n  Batch size for rmd160 scans (multiple of 4, max %d)\n", CPU_GRP_SIZE);
 	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
 	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
-	printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
-	printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
-	printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
-	printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
-	printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
-	printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
+        printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
+        printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
+        printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
+        printf("--mapped-dir dir  Directory for mapped bloom shard files (defaults to --tmpdir or cwd)\n");
+        printf("--mapped-error f  Target false-positive rate for mapped blooms (e.g., 1e-6)\n");
+        printf("--mapped-bpe f    Target bits-per-entry for mapped blooms (derives error)\n");
+        printf("--mapped-plan     Print mapped bloom sizing recommendations and exit\n");
+        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
+        printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
+        printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
 	printf("--load-bloom       Require existing mapped bloom file; do not create a new one\n");
         printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
         printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
@@ -7725,7 +7891,27 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
 
 
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname) {
-        const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+        std::string map_path = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+        if (!map_path.empty() && map_path[0] != '/' && map_path.find(":/") == std::string::npos) {
+                const char *dir_hint = NULL;
+                if (mapped_dir && *mapped_dir) {
+                        dir_hint = mapped_dir;
+                } else if (tmpdir_path && *tmpdir_path) {
+                        dir_hint = tmpdir_path;
+                }
+                if (dir_hint && *dir_hint) {
+                        map_path = std::string(dir_hint) + "/" + map_path;
+                }
+        }
+        std::string parent_dir = path_dirname(map_path);
+        if (!parent_dir.empty()) {
+                bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
+                if (!ensure_directory_exists(parent_dir, readonly)) {
+                        return false;
+                }
+        }
+
+        const char *mapname = map_path.c_str();
         uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
 
         if(FLAGMAPPED) {
