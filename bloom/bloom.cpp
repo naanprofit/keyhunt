@@ -479,6 +479,13 @@ static void entries_hashes_for_bytes(uint64_t bytes, uint64_t *entries, uint8_t 
   }
 }
 
+static int bloom_readonly_mode = 0;
+
+void bloom_set_readonly(int readonly)
+{
+  bloom_readonly_mode = readonly ? 1 : 0;
+}
+
 int bloom_load_mmap(struct bloom *bloom, const char *filename, uint32_t chunks)
 {
   if (!bloom || !filename) {
@@ -510,7 +517,7 @@ int bloom_load_mmap(struct bloom *bloom, const char *filename, uint32_t chunks)
     } else {
       snprintf(fname, sizeof(fname), "%s", filename);
     }
-    int fd = open(fname, O_RDWR);
+    int fd = open(fname, bloom_readonly_mode ? O_RDONLY : O_RDWR);
     if (fd < 0) {
       goto load_error;
     }
@@ -525,7 +532,8 @@ int bloom_load_mmap(struct bloom *bloom, const char *filename, uint32_t chunks)
 #ifdef MAP_POPULATE
     map_flags |= MAP_POPULATE;
 #endif
-    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, map_flags, fd, 0);
+    int prot_flags = bloom_readonly_mode ? PROT_READ : (PROT_READ | PROT_WRITE);
+    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, prot_flags, map_flags, fd, 0);
     close(fd);
     if (map == MAP_FAILED) {
       goto load_error;
@@ -648,7 +656,7 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
 
     int file_exists = (stat(fname, &st) == 0);
     if (file_exists) {
-      fd = open(fname, O_RDWR);
+      fd = open(fname, bloom_readonly_mode ? O_RDONLY : O_RDWR);
       if (fd < 0) {
         int err = errno;
         fprintf(stderr, "bloom_init_mmap: open('%s') failed: %s\n", fname, strerror(err));
@@ -656,7 +664,7 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
       }
       if ((uint64_t)st.st_size != cbytes) {
         if (resize) {
-          if (ftruncate(fd, cbytes) != 0) {
+          if (bloom_readonly_mode || ftruncate(fd, cbytes) != 0) {
             int err = errno;
             close(fd);
             fprintf(stderr, "bloom_init_mmap: ftruncate('%s', %llu) failed: %s\n", fname,
@@ -671,13 +679,13 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
         }
       }
     } else {
-      fd = open(fname, O_RDWR | O_CREAT, 0644);
+      fd = open(fname, bloom_readonly_mode ? O_RDONLY : (O_RDWR | O_CREAT), 0644);
       if (fd < 0) {
         int err = errno;
         fprintf(stderr, "bloom_init_mmap: open('%s') failed: %s\n", fname, strerror(err));
         return 1;
       }
-      if (ftruncate(fd, cbytes) != 0) {
+      if (bloom_readonly_mode || ftruncate(fd, cbytes) != 0) {
         int err = errno;
         close(fd);
         fprintf(stderr, "bloom_init_mmap: ftruncate('%s', %llu) failed: %s\n", fname,
@@ -691,7 +699,8 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
 #ifdef MAP_POPULATE
     map_flags |= MAP_POPULATE;
 #endif
-    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, map_flags, fd, 0);
+    int prot_flags = bloom_readonly_mode ? PROT_READ : (PROT_READ | PROT_WRITE);
+    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, prot_flags, map_flags, fd, 0);
     if (map == MAP_FAILED) {
       int err = errno;
       close(fd);

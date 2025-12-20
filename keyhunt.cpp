@@ -12,6 +12,7 @@ email: albertobsd@gmail.com
 #include <vector>
 #include <atomic>
 #include <new>
+#include <string>
 #include <inttypes.h>
 #include <errno.h>
 #include <ctype.h>
@@ -131,6 +132,24 @@ extern struct bsgs_xvalue *bPtable;
 struct checksumsha256	{
 	char data[32];
 	char backup[32];
+};
+
+struct mapped_bloom_meta {
+	uint32_t magic;
+	uint32_t version;
+	uint32_t layer_id;
+	uint32_t hashes;
+	uint64_t entries;
+	long double error;
+	uint64_t N_param;
+	uint64_t k_param;
+	uint64_t M;
+	uint64_t M2;
+	uint64_t M3;
+	uint64_t block_count;
+	uint64_t block_size;
+	uint32_t shard_count;
+	uint32_t reserved;
 };
 
 struct bsgs_xvalue	{
@@ -497,10 +516,15 @@ int FLAGMATRIX = 0;
 int FLAGMAPPED = 0;
 int FLAGCREATEMAPPED = 0;
 const char *mapped_filename = NULL;
+const char *mapped_dir = NULL;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
+long double mapped_bpe_override = 0;
 uint32_t mapped_chunks = 1;
 int FLAGLOADBLOOM = 0;
+int FLAGFORCEBLOOMREBUILD = 0;
+int FLAGMAPPEDREADONLY = 0;
+int FLAGMAPPEDPLAN = 0;
 
 const char *bptable_filename = NULL;
 uint64_t bptable_size_override = 0;
