@@ -224,6 +224,8 @@ int bloom_init_mmap(struct bloom * bloom, uint64_t entries, long double error, c
 int bloom_load_mmap(struct bloom * bloom, const char *filename, uint32_t chunks);
 void bloom_unmap(struct bloom * bloom);
 void bloom_set_readonly(int readonly);
+void bloom_set_populate(int populate);
+void bloom_set_willneed(int willneed);
 
 #ifdef __cplusplus
 }
