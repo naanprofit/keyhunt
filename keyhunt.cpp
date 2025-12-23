@@ -7,6 +7,7 @@ email: albertobsd@gmail.com
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdarg.h>
 #include <math.h>
 #include <time.h>
 #include <vector>
@@ -100,6 +101,38 @@ static int portable_posix_fallocate(int fd, off_t offset, off_t len) {
 uint32_t  THREADBPWORKLOAD = 1048576;
 static const size_t kIOBufferSize = 4 * 1024 * 1024;
 
+extern int FLAGIOVERBOSE;
+extern int FLAGDEBUG;
+
+static inline double monotonic_ms() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static inline bool io_logs_enabled() {
+        return FLAGIOVERBOSE || FLAGDEBUG;
+}
+
+static void io_logf(const char *fmt, ...) {
+        if(!io_logs_enabled()){
+                return;
+        }
+        va_list ap;
+        va_start(ap, fmt);
+        vprintf(fmt, ap);
+        printf("\n");
+        va_end(ap);
+}
+
+static inline void io_log_duration(const char *label, double start_ms) {
+        if(!io_logs_enabled()){
+                return;
+        }
+        double elapsed = monotonic_ms() - start_ms;
+        printf("[io] %s took %.3f ms\n", label, elapsed);
+}
+
 static inline void tune_file_stream(FILE *stream, size_t bufsize, bool sequential_hint) {
         if(!stream){
                 return;
@@ -121,9 +154,20 @@ static inline void tune_file_stream(FILE *stream, size_t bufsize, bool sequentia
                 }
 #endif
         }
-        (void)sequential_hint;
 #endif
         (void)sequential_hint;
+}
+
+static inline void log_file_allocation(const char *label, int fd, const char *path_hint) {
+        if(!io_logs_enabled()){
+                return;
+        }
+        struct stat st;
+        if(fstat(fd, &st) == 0){
+                uint64_t logical = (uint64_t)st.st_size;
+                uint64_t allocated = (uint64_t)st.st_blocks * 512ULL;
+                printf("[io] %s size=%" PRIu64 " alloc=%" PRIu64 " path=%s\n", label, logical, allocated, path_hint ? path_hint : "(anon)");
+        }
 }
 
 extern uint64_t bptable_cache_boundaries[257];
@@ -527,6 +571,16 @@ int FLAGLOADBLOOM = 0;
 int FLAGFORCEBLOOMREBUILD = 0;
 int FLAGMAPPEDREADONLY = 0;
 int FLAGMAPPEDPLAN = 0;
+int FLAGMAPPEDPOPULATE = 0;
+int FLAGMAPPEDWILLNEED = 0;
+int FLAGIOVERBOSE = 0;
+
+enum PtablePreallocPolicy {
+        PTABLE_PREALLOC_NONE = 0,
+        PTABLE_PREALLOC_FALLOCATE = 1,
+};
+
+int ptable_prealloc_policy = PTABLE_PREALLOC_NONE;
 
 const char *bptable_filename = NULL;
 uint64_t bptable_size_override = 0;
@@ -868,17 +922,21 @@ int main(int argc, char **argv)	{
                {"mapped-error", required_argument, 0, 0},
                {"mapped-bpe", required_argument, 0, 0},
                {"mapped-plan", no_argument, 0, 0},
+               {"mapped-populate", required_argument, 0, 0},
+               {"mapped-willneed", required_argument, 0, 0},
                {"bloom-file", required_argument, 0, 0},
                {"load-bloom", no_argument, 0, 0},
                {"loadbloom", no_argument, 0, 0},
                {"ptable", required_argument, 0, 0},
                {"ptable-size", required_argument, 0, 0},
+               {"ptable-prealloc", required_argument, 0, 0},
                {"load-ptable", no_argument, 0, 0},
                {"loadptable", no_argument, 0, 0},
                {"ptable-cache", no_argument, 0, 0},
                {"force-ptable-rebuild", no_argument, 0, 0},
-               {"bloom-bytes", required_argument, 0, 0},
-               {"create-mapped", optional_argument, 0, 0},
+               {"io-verbose", no_argument, 0, 0},
+                {"bloom-bytes", required_argument, 0, 0},
+                {"create-mapped", optional_argument, 0, 0},
                {"tmpdir", required_argument, 0, 0},
                {"bsgs-block-count", required_argument, 0, 0},
                {"bsgs-block-size", required_argument, 0, 0},
@@ -930,6 +988,18 @@ int main(int argc, char **argv)	{
                              mapped_sizing_opts++;
                      } else if (strcmp(long_options[option_index].name, "mapped-plan") == 0) {
                              FLAGMAPPEDPLAN = 1;
+                     } else if (strcmp(long_options[option_index].name, "mapped-populate") == 0) {
+                             FLAGMAPPEDPOPULATE = (int)strtol(optarg, NULL, 10);
+                             if(FLAGMAPPEDPOPULATE != 0 && FLAGMAPPEDPOPULATE != 1){
+                                     fprintf(stderr, "[W] --mapped-populate expects 0 or 1; defaulting to 0\n");
+                                     FLAGMAPPEDPOPULATE = 0;
+                             }
+                     } else if (strcmp(long_options[option_index].name, "mapped-willneed") == 0) {
+                             FLAGMAPPEDWILLNEED = (int)strtol(optarg, NULL, 10);
+                             if(FLAGMAPPEDWILLNEED != 0 && FLAGMAPPEDWILLNEED != 1){
+                                     fprintf(stderr, "[W] --mapped-willneed expects 0 or 1; defaulting to 0\n");
+                                     FLAGMAPPEDWILLNEED = 0;
+                             }
                       } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
                               mapped_filename = optarg;
                       } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
@@ -950,6 +1020,15 @@ int main(int argc, char **argv)	{
                                       }
                               }
                               bptable_size_override = desired;
+                      } else if (strcmp(long_options[option_index].name, "ptable-prealloc") == 0) {
+                              if(strcmp(optarg, "none") == 0){
+                                      ptable_prealloc_policy = PTABLE_PREALLOC_NONE;
+                              } else if(strcmp(optarg, "fallocate") == 0){
+                                      ptable_prealloc_policy = PTABLE_PREALLOC_FALLOCATE;
+                              } else {
+                                      fprintf(stderr, "[W] Unknown --ptable-prealloc value '%s'; using 'none'\n", optarg);
+                                      ptable_prealloc_policy = PTABLE_PREALLOC_NONE;
+                              }
                       } else if (strcmp(long_options[option_index].name, "load-ptable") == 0) {
                               FLAGLOADPTABLE = 1;
                       } else if (strcmp(long_options[option_index].name, "loadptable") == 0) {
@@ -958,6 +1037,8 @@ int main(int argc, char **argv)	{
                               FLAGPTABLECACHE = 1;
                       } else if (strcmp(long_options[option_index].name, "force-ptable-rebuild") == 0) {
                               FLAGFORCEPTABLEREBUILD = 1;
+                      } else if (strcmp(long_options[option_index].name, "io-verbose") == 0) {
+                              FLAGIOVERBOSE = 1;
                      } else if (strcmp(long_options[option_index].name, "bloom-bytes") == 0) {
                              FLAGMAPPED = 1;
                              char *end;
@@ -2138,16 +2219,20 @@ free(hextemp);
                        }
                        if(fname){
                                if(FLAGLOADPTABLE){
+                                       double t_open = monotonic_ms();
                                        bptable_fd = open(fname,O_RDONLY | O_CLOEXEC);
                                        if(bptable_fd < 0){
                                                fprintf(stderr,"[E] Cannot open bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
+                                       io_log_duration("ptable open (load)", t_open);
                                        struct stat st;
+                                       double t_fstat = monotonic_ms();
                                        if(fstat(bptable_fd,&st) != 0){
                                                fprintf(stderr,"[E] Cannot stat bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
+                                       io_log_duration("ptable fstat", t_fstat);
                                        uint64_t actual_bytes = st.st_size;
                                        if(actual_bytes != expected_map_bytes){
                                                fprintf(stderr,"[E] Existing bP table size mismatch: expected %" PRIu64 " bytes but found %" PRIu64 "\n", expected_map_bytes, actual_bytes);
@@ -2155,25 +2240,36 @@ free(hextemp);
                                                exit(EXIT_FAILURE);
                                        }
                                        printf("[+] ptable: LOADING read-only from %s bytes=%" PRIu64 "\n", fname, map_bytes);
+                                       log_file_allocation("ptable", bptable_fd, fname);
                                        FLAGREADEDFILE3 = 1;
                                }else{
+                                       double t_open = monotonic_ms();
                                        bptable_fd = open(fname,O_RDWR | O_CREAT | O_CLOEXEC,0600);
                                        if(bptable_fd < 0){
                                                fprintf(stderr,"[E] Cannot create bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
+                                       io_log_duration("ptable open", t_open);
                                        if(!have_existing_ptable || st_existing.st_size == 0 || FLAGFORCEPTABLEREBUILD){
                                                const char *action = (!have_existing_ptable || st_existing.st_size == 0) ? "CREATING" : "REBUILDING";
                                                printf("[+] ptable: %s/TRUNCATING %s bytes=%" PRIu64 "\n", action, fname, map_bytes);
+                                               double t_trunc = monotonic_ms();
                                                if(ftruncate(bptable_fd, map_bytes) != 0){
                                                        fprintf(stderr,"[E] Cannot resize bP table file\n");
                                                        exit(EXIT_FAILURE);
                                                }
-                                               if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
-                                                       if(ftruncate(bptable_fd,map_bytes) != 0){
-                                                               fprintf(stderr,"[E] Cannot resize bP table file\n");
-                                                               exit(EXIT_FAILURE);
+                                               io_log_duration("ptable ftruncate", t_trunc);
+                                               if(ptable_prealloc_policy == PTABLE_PREALLOC_FALLOCATE){
+                                                       double t_alloc = monotonic_ms();
+                                                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                                                               if(ftruncate(bptable_fd,map_bytes) != 0){
+                                                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                                                       exit(EXIT_FAILURE);
+                                                               }
                                                        }
+                                                       io_log_duration("ptable posix_fallocate", t_alloc);
+                                               } else {
+                                                       io_logf("[io] ptable preallocation skipped for %s (sparse mode)", fname);
                                                }
                                        }else{
                                                printf("[+] ptable: USING existing %s bytes=%" PRIu64 "\n", fname, map_bytes);
@@ -2186,25 +2282,38 @@ free(hextemp);
                                if(!tmp || !*tmp) tmp = getenv("TMP");
                                if(!tmp || !*tmp) tmp = "/tmp";
                                snprintf(bptable_tmpfile,sizeof(bptable_tmpfile),"%s/bptableXXXXXX",tmp);
+                               double t_open = monotonic_ms();
                                bptable_fd = mkstemp(bptable_tmpfile);
                                if(bptable_fd < 0){
                                        fprintf(stderr,"[E] Cannot create bP table file\n");
                                        exit(EXIT_FAILURE);
                                }
+                               io_log_duration("ptable open", t_open);
                                printf("[+] ptable: CREATING/TRUNCATING %s bytes=%" PRIu64 "\n", bptable_tmpfile, map_bytes);
+                               double t_trunc = monotonic_ms();
                                if(ftruncate(bptable_fd, map_bytes) != 0){
                                        fprintf(stderr,"[E] Cannot resize bP table file\n");
                                        exit(EXIT_FAILURE);
                                }
-                               if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
-                                       if(ftruncate(bptable_fd,map_bytes) != 0){
-                                               fprintf(stderr,"[E] Cannot resize bP table file\n");
-                                               exit(EXIT_FAILURE);
+                               io_log_duration("ptable ftruncate", t_trunc);
+                               if(ptable_prealloc_policy == PTABLE_PREALLOC_FALLOCATE){
+                                       double t_alloc = monotonic_ms();
+                                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                                               if(ftruncate(bptable_fd,map_bytes) != 0){
+                                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                                       exit(EXIT_FAILURE);
+                                               }
+                                       }
+                                       io_log_duration("ptable posix_fallocate", t_alloc);
+                               } else {
+                                       io_logf("[io] ptable preallocation skipped for %s (sparse mode)", bptable_tmpfile);
                                        }
                                }
-                       }
+                       log_file_allocation("ptable", bptable_fd, fname ? fname : bptable_tmpfile);
                        int prot = FLAGLOADPTABLE ? PROT_READ : (PROT_READ|PROT_WRITE);
+                       double t_mmap = monotonic_ms();
                        void *map = mmap(NULL,map_bytes,prot,MAP_SHARED,bptable_fd,0);
+                       io_log_duration("ptable mmap", t_mmap);
                        if(map == MAP_FAILED){
                                fprintf(stderr,"[E] mmap failed for bP table\n");
                                exit(EXIT_FAILURE);
@@ -2214,9 +2323,15 @@ free(hextemp);
                        FLAGBPTABLEMAPPED = 1;
 #if !defined(_WIN64) || defined(__CYGWIN__)
                        if(bptable_bytes){
+                               if(FLAGMAPPEDWILLNEED){
 #if defined(MADV_WILLNEED)
-                               madvise(bPtable, bptable_bytes, MADV_WILLNEED);
+                                       double t_adv = monotonic_ms();
+                                       madvise(bPtable, bptable_bytes, MADV_WILLNEED);
+                                       io_log_duration("ptable madvise(WILLNEED)", t_adv);
+#else
+                                       fprintf(stderr,"[i] ptable: MADV_WILLNEED not supported; skipping\n");
 #endif
+                               }
 #if defined(MADV_SEQUENTIAL)
                                madvise(bPtable, bptable_bytes, MADV_SEQUENTIAL);
 #endif
@@ -6924,15 +7039,19 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
         printf("--mapped-error f  Target false-positive rate for mapped blooms (e.g., 1e-6)\n");
         printf("--mapped-bpe f    Target bits-per-entry for mapped blooms (derives error)\n");
         printf("--mapped-plan     Print mapped bloom sizing recommendations and exit\n");
+        printf("--mapped-populate {0,1}  Request MAP_POPULATE when memory-mapping blooms (default 0)\n");
+        printf("--mapped-willneed {0,1}  Request MADV_WILLNEED for mapped blooms/ptables (default 0)\n");
         printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
         printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
         printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
 	printf("--load-bloom       Require existing mapped bloom file; do not create a new one\n");
         printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
         printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
+        printf("--ptable-prealloc {none,fallocate}  Choose sparse default or explicit full preallocation\n");
         printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
         printf("--force-ptable-rebuild  Overwrite any existing bP table file when creating mapped tables\n");
         printf("--ptable-cache   Enable cached lookup metadata for the mapped bP table when using --load-ptable\n");
+        printf("--io-verbose     Print timing for IO-heavy syscalls (open/mmap/madvise/ftruncate)\n");
         printf("--tmpdir dir     Directory for temporary files\n");
 	printf("\nValid n and maximum k values:\n");
         print_nk_table();
@@ -7917,6 +8036,10 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                         return false;
                 }
         }
+
+        bloom_set_readonly(FLAGLOADBLOOM || FLAGMAPPEDREADONLY);
+        bloom_set_populate(FLAGMAPPEDPOPULATE);
+        bloom_set_willneed(FLAGMAPPEDWILLNEED);
 
         const char *mapname = map_path.c_str();
         uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
