@@ -35,6 +35,26 @@
 #define BLOOM_VERSION_MAJOR 2
 #define BLOOM_VERSION_MINOR 201
 
+int bloom_global_populate = 0;
+int bloom_global_willneed = 0;
+
+static inline int bloom_map_flags()
+{
+  int map_flags = MAP_SHARED;
+  if (bloom_global_populate) {
+#ifdef MAP_POPULATE
+    map_flags |= MAP_POPULATE;
+#else
+    static int warned = 0;
+    if (!warned) {
+      warned = 1;
+      fprintf(stderr, "[i] bloom: MAP_POPULATE not supported; skipping\n");
+    }
+#endif
+  }
+  return map_flags;
+}
+
 inline static int test_bit_set_bit(struct bloom *bloom, uint64_t bit, int set_bit)
 {
   uint64_t byte = bit >> 3;
@@ -84,28 +104,44 @@ inline static int test_bit(struct bloom *bloom, uint64_t bit)
 
 #if !defined(_WIN64)
 static inline void bloom_advise_fd(int fd, off_t length) {
+  if (fd < 0 || length <= 0) {
+    return;
+  }
 #if defined(POSIX_FADV_SEQUENTIAL)
-  if (fd >= 0) {
-    posix_fadvise(fd, 0, length, POSIX_FADV_SEQUENTIAL);
-  }
+  posix_fadvise(fd, 0, length, POSIX_FADV_SEQUENTIAL);
 #endif
+  extern int bloom_global_willneed;
+  if (bloom_global_willneed) {
 #if defined(POSIX_FADV_WILLNEED)
-  if (fd >= 0) {
     posix_fadvise(fd, 0, length, POSIX_FADV_WILLNEED);
-  }
+#else
+    static int warned = 0;
+    if (!warned) {
+      warned = 1;
+      fprintf(stderr, "[i] bloom: POSIX_FADV_WILLNEED not supported; skipping\n");
+    }
 #endif
+  }
 }
 
 static inline void bloom_advise_map(void *addr, size_t length) {
+  if (!addr || length == 0) {
+    return;
+  }
+  extern int bloom_global_willneed;
+  if (bloom_global_willneed) {
 #if defined(MADV_WILLNEED)
-  if (addr && length) {
     madvise(addr, length, MADV_WILLNEED);
-  }
+#else
+    static int warned = 0;
+    if (!warned) {
+      warned = 1;
+      fprintf(stderr, "[i] bloom: MADV_WILLNEED not supported; skipping\n");
+    }
 #endif
-#if defined(MADV_SEQUENTIAL)
-  if (addr && length) {
-    madvise(addr, length, MADV_SEQUENTIAL);
   }
+#if defined(MADV_SEQUENTIAL)
+  madvise(addr, length, MADV_SEQUENTIAL);
 #endif
 }
 #endif
@@ -373,10 +409,7 @@ int bloom_load(struct bloom * bloom, char * filename)
         int cfd = open(fname, O_RDWR);
         if (cfd < 0) { rv = 11; goto load_error_chunks; }
         bloom_advise_fd(cfd, (off_t)cbytes);
-        int map_flags = MAP_SHARED;
-#ifdef MAP_POPULATE
-        map_flags |= MAP_POPULATE;
-#endif
+        int map_flags = bloom_map_flags();
         uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, map_flags, cfd, 0);
         close(cfd);
         if (map == MAP_FAILED) { rv = 12; goto load_error_chunks; }
@@ -389,10 +422,7 @@ int bloom_load(struct bloom * bloom, char * filename)
       int cfd = open(filename, O_RDWR);
       if (cfd < 0) { rv = 11; goto load_error; }
       bloom_advise_fd(cfd, (off_t)bloom->bytes);
-      int map_flags = MAP_SHARED;
-#ifdef MAP_POPULATE
-      map_flags |= MAP_POPULATE;
-#endif
+      int map_flags = bloom_map_flags();
       uint8_t *map = (uint8_t*)mmap(NULL, bloom->bytes, PROT_READ | PROT_WRITE, map_flags, cfd, offset);
       close(cfd);
       if (map == MAP_FAILED) { rv = 12; goto load_error; }
@@ -479,6 +509,23 @@ static void entries_hashes_for_bytes(uint64_t bytes, uint64_t *entries, uint8_t 
   }
 }
 
+static int bloom_readonly_mode = 0;
+
+void bloom_set_readonly(int readonly)
+{
+  bloom_readonly_mode = readonly ? 1 : 0;
+}
+
+void bloom_set_populate(int populate)
+{
+  bloom_global_populate = populate ? 1 : 0;
+}
+
+void bloom_set_willneed(int willneed)
+{
+  bloom_global_willneed = willneed ? 1 : 0;
+}
+
 int bloom_load_mmap(struct bloom *bloom, const char *filename, uint32_t chunks)
 {
   if (!bloom || !filename) {
@@ -510,7 +557,7 @@ int bloom_load_mmap(struct bloom *bloom, const char *filename, uint32_t chunks)
     } else {
       snprintf(fname, sizeof(fname), "%s", filename);
     }
-    int fd = open(fname, O_RDWR);
+    int fd = open(fname, bloom_readonly_mode ? O_RDONLY : O_RDWR);
     if (fd < 0) {
       goto load_error;
     }
@@ -521,11 +568,9 @@ int bloom_load_mmap(struct bloom *bloom, const char *filename, uint32_t chunks)
     }
     uint64_t cbytes = (uint64_t)st.st_size;
     bloom_advise_fd(fd, (off_t)cbytes);
-    int map_flags = MAP_SHARED;
-#ifdef MAP_POPULATE
-    map_flags |= MAP_POPULATE;
-#endif
-    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, map_flags, fd, 0);
+    int map_flags = bloom_map_flags();
+    int prot_flags = bloom_readonly_mode ? PROT_READ : (PROT_READ | PROT_WRITE);
+    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, prot_flags, map_flags, fd, 0);
     close(fd);
     if (map == MAP_FAILED) {
       goto load_error;
@@ -648,7 +693,7 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
 
     int file_exists = (stat(fname, &st) == 0);
     if (file_exists) {
-      fd = open(fname, O_RDWR);
+      fd = open(fname, bloom_readonly_mode ? O_RDONLY : O_RDWR);
       if (fd < 0) {
         int err = errno;
         fprintf(stderr, "bloom_init_mmap: open('%s') failed: %s\n", fname, strerror(err));
@@ -656,7 +701,7 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
       }
       if ((uint64_t)st.st_size != cbytes) {
         if (resize) {
-          if (ftruncate(fd, cbytes) != 0) {
+          if (bloom_readonly_mode || ftruncate(fd, cbytes) != 0) {
             int err = errno;
             close(fd);
             fprintf(stderr, "bloom_init_mmap: ftruncate('%s', %llu) failed: %s\n", fname,
@@ -671,13 +716,13 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
         }
       }
     } else {
-      fd = open(fname, O_RDWR | O_CREAT, 0644);
+      fd = open(fname, bloom_readonly_mode ? O_RDONLY : (O_RDWR | O_CREAT), 0644);
       if (fd < 0) {
         int err = errno;
         fprintf(stderr, "bloom_init_mmap: open('%s') failed: %s\n", fname, strerror(err));
         return 1;
       }
-      if (ftruncate(fd, cbytes) != 0) {
+      if (bloom_readonly_mode || ftruncate(fd, cbytes) != 0) {
         int err = errno;
         close(fd);
         fprintf(stderr, "bloom_init_mmap: ftruncate('%s', %llu) failed: %s\n", fname,
@@ -687,11 +732,9 @@ int bloom_init_mmap(struct bloom *bloom, uint64_t entries, long double error, co
     }
 
     bloom_advise_fd(fd, (off_t)cbytes);
-    int map_flags = MAP_SHARED;
-#ifdef MAP_POPULATE
-    map_flags |= MAP_POPULATE;
-#endif
-    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, PROT_READ | PROT_WRITE, map_flags, fd, 0);
+    int map_flags = bloom_map_flags();
+    int prot_flags = bloom_readonly_mode ? PROT_READ : (PROT_READ | PROT_WRITE);
+    uint8_t *map = (uint8_t*)mmap(NULL, cbytes, prot_flags, map_flags, fd, 0);
     if (map == MAP_FAILED) {
       int err = errno;
       close(fd);

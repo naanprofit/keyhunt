@@ -60,10 +60,12 @@ supplied, keyhunt stores this table in a temporary file and maps it into
 memory. Use `--ptable=<file>` or `--ptable <file>` to select the backing file
 path and `--ptable-size <size>` preallocates it (accepting `K`, `M`, `G` and `T`
 suffixes). The mapped table is flushed on shutdown and the temporary file is
-removed unless a path was explicitly provided. To reuse an existing bP table,
-combine `--load-ptable` with `--ptable`. By default the file is created in the
-system temporary directory; use `--tmpdir <dir>` or set `TEMP`/`TMPDIR` to
-choose a different location.
+removed unless a path was explicitly provided. By default the file is created
+as a sparse allocation via `ftruncate`; use `--ptable-prealloc fallocate` if
+you explicitly want on-disk preallocation (which can be slow for large files).
+To reuse an existing bP table, combine `--load-ptable` with `--ptable`. By
+default the file is created in the system temporary directory; use `--tmpdir
+<dir>` or set `TEMP`/`TMPDIR` to choose a different location.
 
 ## Free Code
 

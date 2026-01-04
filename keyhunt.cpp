@@ -7,11 +7,15 @@ email: albertobsd@gmail.com
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdarg.h>
 #include <math.h>
 #include <time.h>
 #include <vector>
 #include <atomic>
 #include <new>
+#include <string>
+#include <sstream>
+#include <limits>
 #include <inttypes.h>
 #include <errno.h>
 #include <ctype.h>
@@ -48,6 +52,10 @@ email: albertobsd@gmail.com
 #include <fcntl.h>
 #include <sys/statvfs.h>
 #include <sys/stat.h>
+#endif
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
 #endif
 
 #if defined(__APPLE__)
@@ -93,6 +101,38 @@ static int portable_posix_fallocate(int fd, off_t offset, off_t len) {
 uint32_t  THREADBPWORKLOAD = 1048576;
 static const size_t kIOBufferSize = 4 * 1024 * 1024;
 
+extern int FLAGIOVERBOSE;
+extern int FLAGDEBUG;
+
+static inline double monotonic_ms() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static inline bool io_logs_enabled() {
+        return FLAGIOVERBOSE || FLAGDEBUG;
+}
+
+static void io_logf(const char *fmt, ...) {
+        if(!io_logs_enabled()){
+                return;
+        }
+        va_list ap;
+        va_start(ap, fmt);
+        vprintf(fmt, ap);
+        printf("\n");
+        va_end(ap);
+}
+
+static inline void io_log_duration(const char *label, double start_ms) {
+        if(!io_logs_enabled()){
+                return;
+        }
+        double elapsed = monotonic_ms() - start_ms;
+        printf("[io] %s took %.3f ms\n", label, elapsed);
+}
+
 static inline void tune_file_stream(FILE *stream, size_t bufsize, bool sequential_hint) {
         if(!stream){
                 return;
@@ -114,9 +154,20 @@ static inline void tune_file_stream(FILE *stream, size_t bufsize, bool sequentia
                 }
 #endif
         }
-        (void)sequential_hint;
 #endif
         (void)sequential_hint;
+}
+
+static inline void log_file_allocation(const char *label, int fd, const char *path_hint) {
+        if(!io_logs_enabled()){
+                return;
+        }
+        struct stat st;
+        if(fstat(fd, &st) == 0){
+                uint64_t logical = (uint64_t)st.st_size;
+                uint64_t allocated = (uint64_t)st.st_blocks * 512ULL;
+                printf("[io] %s size=%" PRIu64 " alloc=%" PRIu64 " path=%s\n", label, logical, allocated, path_hint ? path_hint : "(anon)");
+        }
 }
 
 extern uint64_t bptable_cache_boundaries[257];
@@ -127,6 +178,24 @@ extern struct bsgs_xvalue *bPtable;
 struct checksumsha256	{
 	char data[32];
 	char backup[32];
+};
+
+struct mapped_bloom_meta {
+	uint32_t magic;
+	uint32_t version;
+	uint32_t layer_id;
+	uint32_t hashes;
+	uint64_t entries;
+	long double error;
+	uint64_t N_param;
+	uint64_t k_param;
+	uint64_t M;
+	uint64_t M2;
+	uint64_t M3;
+	uint64_t block_count;
+	uint64_t block_size;
+	uint32_t shard_count;
+	uint32_t reserved;
 };
 
 struct bsgs_xvalue	{
@@ -328,7 +397,7 @@ void bsgs_swap(struct bsgs_xvalue *a,struct bsgs_xvalue *b);
 void bsgs_heapify(struct bsgs_xvalue *arr, int64_t n, int64_t i);
 int64_t bsgs_partition(struct bsgs_xvalue *arr, int64_t n);
 
-int bsgs_searchbinary(struct bsgs_xvalue *arr,char *data,int64_t array_length,uint64_t *r_value);
+int bsgs_searchbinary(struct bsgs_xvalue *arr,char *data,int64_t array_length,uint64_t *range_start,uint64_t *range_end);
 int bsgs_secondcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey);
 int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey);
 void build_bptable_cache(uint64_t entry_count);
@@ -493,10 +562,25 @@ int FLAGMATRIX = 0;
 int FLAGMAPPED = 0;
 int FLAGCREATEMAPPED = 0;
 const char *mapped_filename = NULL;
+const char *mapped_dir = NULL;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
+long double mapped_bpe_override = 0;
 uint32_t mapped_chunks = 1;
 int FLAGLOADBLOOM = 0;
+int FLAGFORCEBLOOMREBUILD = 0;
+int FLAGMAPPEDREADONLY = 0;
+int FLAGMAPPEDPLAN = 0;
+int FLAGMAPPEDPOPULATE = 0;
+int FLAGMAPPEDWILLNEED = 0;
+int FLAGIOVERBOSE = 0;
+
+enum PtablePreallocPolicy {
+        PTABLE_PREALLOC_NONE = 0,
+        PTABLE_PREALLOC_FALLOCATE = 1,
+};
+
+int ptable_prealloc_policy = PTABLE_PREALLOC_NONE;
 
 const char *bptable_filename = NULL;
 uint64_t bptable_size_override = 0;
@@ -504,6 +588,7 @@ int bptable_fd = -1;
 uint64_t bptable_bytes = 0;
 int FLAGBPTABLEMAPPED = 0;
 int FLAGLOADPTABLE = 0;
+int FLAGFORCEPTABLEREBUILD = 0;
 int FLAGPTABLECACHE = 0;
 uint64_t bptable_cache_boundaries[257];
 int FLAGBPTABLECACHE_READY = 0;
@@ -514,6 +599,113 @@ const char *tmpdir_path = NULL;
 int KFACTOR = 1;
 int MAXLENGTHADDRESS = -1;
 int NTHREADS = 1;
+
+static std::string path_dirname(const std::string &input) {
+        size_t pos = input.find_last_of("/\\");
+        if (pos == std::string::npos) {
+                return std::string();
+        }
+        if (pos == 0) {
+                return std::string("/");
+        }
+        return input.substr(0, pos);
+}
+
+static std::string path_basename(const std::string &input) {
+        size_t pos = input.find_last_of("/\\");
+        if (pos == std::string::npos) {
+                return input;
+        }
+        return input.substr(pos + 1);
+}
+
+static bool ensure_directory_exists(const std::string &dir, bool readonly) {
+        if (dir.empty()) {
+                return true;
+        }
+        struct stat st;
+        if (stat(dir.c_str(), &st) == 0) {
+                if (S_ISDIR(st.st_mode)) {
+                        return true;
+                }
+                fprintf(stderr, "[E] Path %s exists but is not a directory.\n", dir.c_str());
+                return false;
+        }
+        if (readonly) {
+                fprintf(stderr, "[E] Directory %s does not exist and read-only mode is enabled.\n", dir.c_str());
+                return false;
+        }
+        std::string partial;
+        for (size_t i = 0; i < dir.size(); i++) {
+                partial.push_back(dir[i]);
+                if (dir[i] == '/' || dir[i] == '\\') {
+                        if (partial.size() == 1 && partial[0] == '/') {
+                                continue;
+                        }
+                        mkdir(partial.c_str(), 0755);
+                }
+        }
+        if (mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) {
+                fprintf(stderr, "[E] Unable to create directory %s: %s\n", dir.c_str(), strerror(errno));
+                return false;
+        }
+        return true;
+}
+
+static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix) {
+        std::string mf = mapped_filename ? mapped_filename : "";
+        bool ends_with_sep = (!mf.empty() && (mf.back() == '/' || mf.back() == '\\'));
+        std::string mf_dir;
+        std::string mf_body;
+        if (!mf.empty()) {
+                if (ends_with_sep) {
+                        mf_dir = mf.substr(0, mf.size() - 1);
+                } else {
+                        mf_dir = path_dirname(mf);
+                        mf_body = path_basename(mf);
+                }
+        }
+
+        std::string dir;
+        if (mapped_dir && *mapped_dir) {
+                dir = mapped_dir;
+        } else if (!mf_dir.empty()) {
+                dir = mf_dir;
+        } else if (tmpdir_path && *tmpdir_path) {
+                dir = tmpdir_path;
+        } else {
+                dir = ".";
+        }
+        if (!dir.empty() && dir.back() == '/') {
+                dir.pop_back();
+        }
+
+        char label[64];
+        snprintf(label, sizeof(label), "layer%u-%03u", layer, bucket);
+        bool has_placeholder = (!mf_body.empty() && mf_body.find("%s") != std::string::npos);
+        std::string shard_name;
+        if (has_placeholder) {
+                char buf[1024];
+                snprintf(buf, sizeof(buf), mf_body.c_str(), label);
+                shard_name = buf;
+        } else if (!mf_body.empty()) {
+                shard_name = mf_body + "." + label + ".dat";
+        } else {
+                shard_name = std::string(fallback_prefix) + "." + label + ".dat";
+        }
+
+        bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
+        if (!ensure_directory_exists(dir, readonly)) {
+                exit(EXIT_FAILURE);
+        }
+
+        std::string fullpath = dir;
+        if (!fullpath.empty() && fullpath.back() != '/') {
+                fullpath.push_back('/');
+        }
+        fullpath += shard_name;
+        return fullpath;
+}
 
 int FLAGSAVEREADFILE = 0;
 int FLAGREADEDFILE1 = 0;
@@ -549,9 +741,9 @@ uint64_t BSGS_BUFFERREGISTERLENGTH = 36;
 /*
 BSGS Variables
 */
-int *bsgs_found;
+std::vector<int> bsgs_found;
 std::vector<Point> OriginalPointsBSGS;
-bool *OriginalPointsBSGScompressed;
+std::vector<bool> OriginalPointsBSGScompressed;
 
 uint64_t bytes;
 char checksum[32],checksum_backup[32];
@@ -719,19 +911,32 @@ int main(int argc, char **argv)	{
 	
        printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
+       opterr = 0;
        int option_index = 0;
+       int mapped_sizing_opts = 0;
        static struct option long_options[] = {
                {"mapped", optional_argument, 0, 0},
                {"mapped-size", required_argument, 0, 0},
                {"mapped-chunks", required_argument, 0, 0},
+               {"mapped-dir", required_argument, 0, 0},
+               {"mapped-error", required_argument, 0, 0},
+               {"mapped-bpe", required_argument, 0, 0},
+               {"mapped-plan", no_argument, 0, 0},
+               {"mapped-populate", required_argument, 0, 0},
+               {"mapped-willneed", required_argument, 0, 0},
                {"bloom-file", required_argument, 0, 0},
                {"load-bloom", no_argument, 0, 0},
+               {"loadbloom", no_argument, 0, 0},
                {"ptable", required_argument, 0, 0},
                {"ptable-size", required_argument, 0, 0},
+               {"ptable-prealloc", required_argument, 0, 0},
                {"load-ptable", no_argument, 0, 0},
+               {"loadptable", no_argument, 0, 0},
                {"ptable-cache", no_argument, 0, 0},
-               {"bloom-bytes", required_argument, 0, 0},
-               {"create-mapped", optional_argument, 0, 0},
+               {"force-ptable-rebuild", no_argument, 0, 0},
+               {"io-verbose", no_argument, 0, 0},
+                {"bloom-bytes", required_argument, 0, 0},
+                {"create-mapped", optional_argument, 0, 0},
                {"tmpdir", required_argument, 0, 0},
                {"bsgs-block-count", required_argument, 0, 0},
                {"bsgs-block-size", required_argument, 0, 0},
@@ -739,9 +944,9 @@ int main(int argc, char **argv)	{
                {0, 0, 0, 0}
        };
 
-       while ((c = getopt_long(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, &option_index)) != -1) {
+       while ((c = getopt_long(argc, argv, ":deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:", long_options, &option_index)) != -1) {
               if (c == 0) {
-                     if (strcmp(long_options[option_index].name, "mapped") == 0) {
+                      if (strcmp(long_options[option_index].name, "mapped") == 0) {
                               FLAGMAPPED = 1;
                               if (optarg) {
                                       mapped_filename = optarg;
@@ -762,15 +967,47 @@ int main(int argc, char **argv)	{
                               bloom_entries_for_bytes(desired, &n, &k);
                               mapped_entries_override = n;
                               mapped_error_override = powl(0.5L, (long double)k);
-                      } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
-                              FLAGMAPPED = 1;
-                              mapped_chunks = strtoul(optarg, NULL, 10);
-                    } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
-                             mapped_filename = optarg;
-                    } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
-                             FLAGLOADBLOOM = 1;
+                              mapped_sizing_opts++;
+                     } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
+                             FLAGMAPPED = 1;
+                             mapped_chunks = strtoul(optarg, NULL, 10);
+                             if (mapped_chunks == 0) {
+                                     fprintf(stderr, "[W] Invalid --mapped-chunks value %s, forcing 1.\n", optarg);
+                                     mapped_chunks = 1;
+                             }
+                     } else if (strcmp(long_options[option_index].name, "mapped-dir") == 0) {
+                             mapped_dir = optarg;
+                     } else if (strcmp(long_options[option_index].name, "mapped-error") == 0) {
+                             FLAGMAPPED = 1;
+                             mapped_error_override = strtold(optarg, NULL);
+                             mapped_sizing_opts++;
+                     } else if (strcmp(long_options[option_index].name, "mapped-bpe") == 0) {
+                             FLAGMAPPED = 1;
+                             mapped_bpe_override = strtold(optarg, NULL);
+                             mapped_error_override = powl(0.6185L, mapped_bpe_override);
+                             mapped_sizing_opts++;
+                     } else if (strcmp(long_options[option_index].name, "mapped-plan") == 0) {
+                             FLAGMAPPEDPLAN = 1;
+                     } else if (strcmp(long_options[option_index].name, "mapped-populate") == 0) {
+                             FLAGMAPPEDPOPULATE = (int)strtol(optarg, NULL, 10);
+                             if(FLAGMAPPEDPOPULATE != 0 && FLAGMAPPEDPOPULATE != 1){
+                                     fprintf(stderr, "[W] --mapped-populate expects 0 or 1; defaulting to 0\n");
+                                     FLAGMAPPEDPOPULATE = 0;
+                             }
+                     } else if (strcmp(long_options[option_index].name, "mapped-willneed") == 0) {
+                             FLAGMAPPEDWILLNEED = (int)strtol(optarg, NULL, 10);
+                             if(FLAGMAPPEDWILLNEED != 0 && FLAGMAPPEDWILLNEED != 1){
+                                     fprintf(stderr, "[W] --mapped-willneed expects 0 or 1; defaulting to 0\n");
+                                     FLAGMAPPEDWILLNEED = 0;
+                             }
+                      } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
+                              mapped_filename = optarg;
+                      } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
+                              FLAGLOADBLOOM = 1;
+                      } else if (strcmp(long_options[option_index].name, "loadbloom") == 0) {
+                              FLAGLOADBLOOM = 1;
                       } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
-                             bptable_filename = optarg;
+                              bptable_filename = optarg;
                       } else if (strcmp(long_options[option_index].name, "ptable-size") == 0) {
                               char *end;
                               uint64_t desired = strtoull(optarg, &end, 10);
@@ -783,17 +1020,42 @@ int main(int argc, char **argv)	{
                                       }
                               }
                               bptable_size_override = desired;
+                      } else if (strcmp(long_options[option_index].name, "ptable-prealloc") == 0) {
+                              if(strcmp(optarg, "none") == 0){
+                                      ptable_prealloc_policy = PTABLE_PREALLOC_NONE;
+                              } else if(strcmp(optarg, "fallocate") == 0){
+                                      ptable_prealloc_policy = PTABLE_PREALLOC_FALLOCATE;
+                              } else {
+                                      fprintf(stderr, "[W] Unknown --ptable-prealloc value '%s'; using 'none'\n", optarg);
+                                      ptable_prealloc_policy = PTABLE_PREALLOC_NONE;
+                              }
                       } else if (strcmp(long_options[option_index].name, "load-ptable") == 0) {
+                              FLAGLOADPTABLE = 1;
+                      } else if (strcmp(long_options[option_index].name, "loadptable") == 0) {
                               FLAGLOADPTABLE = 1;
                       } else if (strcmp(long_options[option_index].name, "ptable-cache") == 0) {
                               FLAGPTABLECACHE = 1;
-                      } else if (strcmp(long_options[option_index].name, "bloom-bytes") == 0) {
-                              FLAGMAPPED = 1;
-                              uint64_t desired = strtoull(optarg, NULL, 10);
-                              uint64_t n; uint32_t k;
-                              bloom_entries_for_bytes(desired, &n, &k);
-                              mapped_entries_override = n;
-                              mapped_error_override = powl(0.5L, (long double)k);
+                      } else if (strcmp(long_options[option_index].name, "force-ptable-rebuild") == 0) {
+                              FLAGFORCEPTABLEREBUILD = 1;
+                      } else if (strcmp(long_options[option_index].name, "io-verbose") == 0) {
+                              FLAGIOVERBOSE = 1;
+                     } else if (strcmp(long_options[option_index].name, "bloom-bytes") == 0) {
+                             FLAGMAPPED = 1;
+                             char *end;
+                             uint64_t desired = strtoull(optarg, &end, 10);
+                             if (*end) {
+                                     switch (tolower(*end)) {
+                                             case 'k': desired *= 1024ULL; break;
+                                             case 'm': desired *= 1024ULL * 1024ULL; break;
+                                             case 'g': desired *= 1024ULL * 1024ULL * 1024ULL; break;
+                                             case 't': desired *= 1024ULL * 1024ULL * 1024ULL * 1024ULL; break;
+                                     }
+                             }
+                             uint64_t n; uint32_t k;
+                             bloom_entries_for_bytes(desired, &n, &k);
+                             mapped_entries_override = n;
+                             mapped_error_override = powl(0.5L, (long double)k);
+                             mapped_sizing_opts++;
                       } else if (strcmp(long_options[option_index].name, "create-mapped") == 0) {
                               FLAGMAPPED = 1;
                               FLAGCREATEMAPPED = 1;
@@ -803,6 +1065,7 @@ int main(int argc, char **argv)	{
                                       bloom_entries_for_bytes(desired, &n, &k);
                                       mapped_entries_override = n;
                                       mapped_error_override = powl(0.5L, (long double)k);
+                                      mapped_sizing_opts++;
                               }
                       } else if (strcmp(long_options[option_index].name, "tmpdir") == 0) {
                               tmpdir_path = optarg;
@@ -831,9 +1094,30 @@ int main(int argc, char **argv)	{
                       continue;
               }
                switch(c) {
-			case 'h':
-				menu();
-			break;
+                      case '?':
+                      case ':': {
+                               const char *current_opt = (optind > 0 && optind <= argc) ? argv[optind - 1] : NULL;
+                               if (c == ':' && (optopt || current_opt)) {
+                                       if (optopt) {
+                                               fprintf(stderr, "[E] Option -%c requires an argument\n", optopt);
+                                       } else {
+                                               fprintf(stderr, "[E] Option '%s' requires an argument\n", current_opt ? current_opt : "(unknown)");
+                                       }
+                               } else {
+                                       if (optopt) {
+                                               fprintf(stderr, "[E] Unknown option -%c\n", optopt);
+                                       } else if (current_opt) {
+                                               fprintf(stderr, "[E] Unknown option '%s'\n", current_opt);
+                                       } else {
+                                               fprintf(stderr, "[E] Unknown option encountered\n");
+                                       }
+                               }
+                               menu();
+                               exit(EXIT_FAILURE);
+                       }
+                        case 'h':
+                                menu();
+                       break;
 			case '6':
 				FLAGSKIPCHECKSUM = 1;
 				fprintf(stderr,"[W] Skipping checksums on files\n");
@@ -1123,10 +1407,15 @@ int main(int argc, char **argv)	{
                }
        }
 
-       if (FLAGLOADPTABLE && !bptable_filename) {
-               fprintf(stderr, "--load-ptable requires --ptable <file>\n");
-               exit(EXIT_FAILURE);
-       }
+if (FLAGLOADPTABLE && !bptable_filename) {
+fprintf(stderr, "--load-ptable requires --ptable <file>\n");
+exit(EXIT_FAILURE);
+}
+
+if(mapped_sizing_opts > 1){
+fprintf(stderr,"[E] Choose only one of --mapped-size, --bloom-bytes, --mapped-error, or --mapped-bpe.\n");
+exit(EXIT_FAILURE);
+}
 
        if (FLAGCREATEMAPPED) {
                if (!mapped_entries_override) {
@@ -1372,74 +1661,64 @@ int main(int argc, char **argv)	{
 			exit(EXIT_FAILURE);
 		}
 		aux = (char*) malloc(1024);
-		checkpointer((void *)aux,__FILE__,"malloc","aux" ,__LINE__ - 1);
-		while(!feof(fd))	{
-			if(fgets(aux,1022,fd) == aux)	{
-				trim(aux," \t\n\r");
-				if(strlen(aux) >= 128)	{	//Length of a full address in hexadecimal without 04
-						N++;
-				}else	{
-					if(strlen(aux) >= 66)	{
-						N++;
-					}
-				}
-			}
-		}
-		if(N == 0)	{
-			fprintf(stderr,"[E] There is no valid data in the file\n");
-			exit(EXIT_FAILURE);
-		}
-		bsgs_found = (int*) calloc(N,sizeof(int));
-		checkpointer((void *)bsgs_found,__FILE__,"calloc","bsgs_found" ,__LINE__ -1 );
-		OriginalPointsBSGS.reserve(N);
-		OriginalPointsBSGScompressed = (bool*) malloc(N*sizeof(bool));
-		checkpointer((void *)OriginalPointsBSGScompressed,__FILE__,"malloc","OriginalPointsBSGScompressed" ,__LINE__ -1 );
-		pointx_str = (char*) malloc(65);
-		checkpointer((void *)pointx_str,__FILE__,"malloc","pointx_str" ,__LINE__ -1 );
-		pointy_str = (char*) malloc(65);
-		checkpointer((void *)pointy_str,__FILE__,"malloc","pointy_str" ,__LINE__ -1 );
-		fseek(fd,0,SEEK_SET);
-		i = 0;
-		while(!feof(fd))	{
-			if(fgets(aux,1022,fd) == aux)	{
-				trim(aux," \t\n\r");
-				if(strlen(aux) >= 66)	{
-					stringtokenizer(aux,&tokenizerbsgs);
-					aux2 = nextToken(&tokenizerbsgs);
-					memset(pointx_str,0,65);
-					memset(pointy_str,0,65);
-					switch(strlen(aux2))	{
-						case 66:	//Compress
+                checkpointer((void *)aux,__FILE__,"malloc","aux" ,__LINE__ - 1);
+                Point point_aux;
+                uint64_t counted = 0;
+                while(fgets(aux,1022,fd) == aux) {
+                        trim(aux," \t\n\r");
+                        size_t len = strlen(aux);
+                        if(len >= 66) {
+                                counted++;
+                        }
+                }
+                if(counted == 0)        {
+                        fprintf(stderr,"[E] There is no valid data in the file\n");
+                        exit(EXIT_FAILURE);
+                }
+                bsgs_found.assign(counted,0);
+                OriginalPointsBSGS.clear();
+                OriginalPointsBSGScompressed.clear();
+                OriginalPointsBSGS.reserve(counted);
+                OriginalPointsBSGScompressed.reserve(counted);
+                pointx_str = (char*) malloc(65);
+                checkpointer((void *)pointx_str,__FILE__,"malloc","pointx_str" ,__LINE__ -1 );
+                pointy_str = (char*) malloc(65);
+                checkpointer((void *)pointy_str,__FILE__,"malloc","pointy_str" ,__LINE__ -1 );
+                fseek(fd,0,SEEK_SET);
+                i = 0;
+                while(fgets(aux,1022,fd) == aux) {
+                        trim(aux," \t\n\r");
+                        size_t len = strlen(aux);
+                        if(len >= 66)   {
+                                stringtokenizer(aux,&tokenizerbsgs);
+                                aux2 = nextToken(&tokenizerbsgs);
+                                memset(pointx_str,0,65);
+                                memset(pointy_str,0,65);
+                                bool isCompressed = false;
+                                bool parsed = false;
+                                switch(strlen(aux2))    {
+                                        case 66:        //Compress
+                                                parsed = secp->ParsePublicKeyHex(aux2,point_aux,isCompressed);
+                                        break;
+                                        case 130:       //With the 04
+                                                parsed = secp->ParsePublicKeyHex(aux2,point_aux,isCompressed);
+                                        break;
+                                        default:
+                                                printf("Invalid length: %s\n",aux2);
+                                        break;
+                                }
+                                if(parsed) {
+                                        OriginalPointsBSGS.push_back(point_aux);
+                                        OriginalPointsBSGScompressed.push_back(isCompressed);
+                                        i++;
+                                }
+                                freetokenizer(&tokenizerbsgs);
+                        }
+                }
+                fclose(fd);
+                bsgs_point_number = (uint32_t)OriginalPointsBSGS.size();
+                bsgs_found.assign(bsgs_point_number,0);
 
-							if(secp->ParsePublicKeyHex(aux2,OriginalPointsBSGS[i],OriginalPointsBSGScompressed[i]))	{
-								i++;
-							}
-							else	{
-								N--;
-							}
-
-						break;
-						case 130:	//With the 04
-
-							if(secp->ParsePublicKeyHex(aux2,OriginalPointsBSGS[i],OriginalPointsBSGScompressed[i]))	{
-								i++;
-							}
-							else	{
-								N--;
-							}
-
-						break;
-						default:
-							printf("Invalid length: %s\n",aux2);
-							N--;
-						break;
-					}
-					freetokenizer(&tokenizerbsgs);
-				}
-			}
-		}
-		fclose(fd);
-		bsgs_point_number = N;
 		if(bsgs_point_number > 0)	{
 			printf("[+] Added %u points from file\n",bsgs_point_number);
 		}
@@ -1650,10 +1929,65 @@ free(hextemp);
 			itemsbloom3 = 1000;
 		}
 		
+                if (mapped_chunks == 0) {
+                        mapped_chunks = 1;
+                }
                 long double bloom_error = mapped_error_override ? mapped_error_override : 0.000001L;
                 uint64_t shard_bytes = bloom_bytes_for_entries_error(itemsbloom, bloom_error);
                 double shard_mb = (double)shard_bytes / 1048576.0;
                 double layer_total_mb = shard_mb * 256.0;
+                uint64_t projected_files = (uint64_t)mapped_chunks * 256ULL * 3ULL;
+                if (projected_files > 8192ULL) {
+                        fprintf(stderr, "[E] Refusing to create %" PRIu64 " bloom chunk files (mapped-chunks=%u). Reduce --mapped-chunks or consolidate mapping.\n",
+                                projected_files, (unsigned)mapped_chunks);
+                        exit(EXIT_FAILURE);
+                }
+
+                if (FLAGMAPPEDPLAN) {
+                        auto print_plan_row = [](const char *label, uint64_t items, long double target_error) {
+                                long double bpe = (-logl(target_error)) / 0.480453013918201L;
+                                uint8_t hashes = (uint8_t)ceill(0.693147180559945L * bpe);
+                                long double bits = bpe * (long double)items;
+                                uint64_t bytes = (uint64_t)(bits / 8.0L);
+                                if (fmodl(bits, 8.0L) > 0.0L) {
+                                        bytes += 1;
+                                }
+                                long double achieved = powl(1 - expl(-(long double)hashes * (long double)items / (long double)(bytes * 8ULL)), hashes);
+                                printf("    %-12s items=%" PRIu64 " hashes=%u bpe=%.2Lf err~=%.1Le shard_bytes=%.2Lf total_bytes=%.2Lf\n",
+                                       label,
+                                       items,
+                                       hashes,
+                                       bpe,
+                                       achieved,
+                                       (long double)bytes / 1048576.0L,
+                                       ((long double)bytes * 256.0L) / 1048576.0L);
+                        };
+
+                        printf("[plan] Mode: BSGS mapped bloom planning\n");
+                        char *n_hex = BSGS_N.GetBase16();
+                        printf("[plan] N=0x%s k=%u M=%" PRIu64 " M2=%" PRIu64 " M3=%" PRIu64 " block-count=%" PRIu64 "\n",
+                               n_hex, KFACTOR, (uint64_t)bsgs_m, (uint64_t)bsgs_m2, (uint64_t)bsgs_m3, (uint64_t)bsgs_ggsb.block_count);
+                        free(n_hex);
+                        printf("[plan] Items per shard: L1=%" PRIu64 " L2=%" PRIu64 " L3=%" PRIu64 "\n", itemsbloom, itemsbloom2, itemsbloom3);
+                        long double errors[] = {1e-3L, 1e-4L, 1e-6L, 1e-8L};
+                        long double bpes[] = {8L, 10L, 12L, 14L, 16L, 20L, 28L, 43L};
+                        printf("[plan] Common error targets:\n");
+                        for (size_t idx = 0; idx < sizeof(errors)/sizeof(errors[0]); idx++) {
+                                print_plan_row("L1", itemsbloom, errors[idx]);
+                                print_plan_row("L2", itemsbloom2, errors[idx]);
+                                print_plan_row("L3", itemsbloom3, errors[idx]);
+                        }
+                        printf("[plan] Common bits-per-entry:\n");
+                        for (size_t idx = 0; idx < sizeof(bpes)/sizeof(bpes[0]); idx++) {
+                                long double err = powl(0.6185L, bpes[idx]);
+                                print_plan_row("L1", itemsbloom, err);
+                                print_plan_row("L2", itemsbloom2, err);
+                                print_plan_row("L3", itemsbloom3, err);
+                        }
+                        long double recommended = mapped_error_override ? mapped_error_override : 1e-6L;
+                        printf("[plan] Recommended default error=%.1Le (balanced speed vs disk)\n", recommended);
+                        exit(EXIT_SUCCESS);
+                }
 
                 uint64_t effective_blocks = (bsgs_ggsb.enabled && bsgs_ggsb.block_count)
                         ? bsgs_ggsb.block_count
@@ -1673,6 +2007,10 @@ free(hextemp);
                 fprintf(stderr,
                         "[i] Expected sizes: each bloom layer ~%.2f MB (256 shards), bPtable ~%.2f MB per block (%.2f MB total).\n",
                         layer_total_mb, ptable_mb, ptable_total_mb);
+
+                std::string bloom_preview = build_bloom_shard_path(1, 0, "bloom");
+                std::string bloom_dir = path_dirname(bloom_preview);
+                printf("[i] Bloom shards will be stored under %s (example: %s)\n", bloom_dir.c_str(), bloom_preview.c_str());
 
                 printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m);
 		bloom_bP = (struct bloom*)calloc(256,sizeof(struct bloom));
@@ -1697,9 +2035,8 @@ free(hextemp);
 #else
 			pthread_mutex_init(&bloom_bP_mutex[i],NULL);
 #endif
-                        char fname[32];
-                        snprintf(fname, sizeof(fname), "bloom-%u.dat", (unsigned)i);
-                        if(!initBloomFilterMapped(&bloom_bP[i],itemsbloom,fname)){
+                        std::string fname = build_bloom_shard_path(1, i, "bloom");
+                        if(!initBloomFilterMapped(&bloom_bP[i],itemsbloom,fname.c_str())){
                                 fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
                                 exit(EXIT_FAILURE);
                         }
@@ -1728,9 +2065,8 @@ free(hextemp);
 #else
 			pthread_mutex_init(&bloom_bPx2nd_mutex[i],NULL);
 #endif
-                        char fname2[32];
-                        snprintf(fname2, sizeof(fname2), "bloom2-%u.dat", (unsigned)i);
-                        if(!initBloomFilterMapped(&bloom_bPx2nd[i],itemsbloom2,fname2)){
+                        std::string fname2 = build_bloom_shard_path(2, i, "bloom2");
+                        if(!initBloomFilterMapped(&bloom_bPx2nd[i],itemsbloom2,fname2.c_str())){
                                 fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
                                 exit(EXIT_FAILURE);
                         }
@@ -1759,9 +2095,8 @@ free(hextemp);
 #else
 			pthread_mutex_init(&bloom_bPx3rd_mutex[i],NULL);
 #endif
-                        char fname3[32];
-                        snprintf(fname3, sizeof(fname3), "bloom3-%u.dat", (unsigned)i);
-                        if(!initBloomFilterMapped(&bloom_bPx3rd[i],itemsbloom3,fname3)){
+                        std::string fname3 = build_bloom_shard_path(3, i, "bloom3");
+                        if(!initBloomFilterMapped(&bloom_bPx3rd[i],itemsbloom3,fname3.c_str())){
                                 fprintf(stderr,"[E] error bloom_init [%" PRIu64 "]\n",i);
                                 exit(EXIT_FAILURE);
                         }
@@ -1854,40 +2189,90 @@ free(hextemp);
                        checkpointer((void *)bPtable,__FILE__,"malloc","bPtable" ,__LINE__ -1 );
                        memset(bPtable,0,bytes);
 #else
-                       uint64_t map_bytes = bytes;
-                       if(bptable_size_override && bptable_size_override > map_bytes){
-                               map_bytes = bptable_size_override;
+                       uint64_t expected_map_bytes = bytes;
+                       if(bptable_size_override){
+                               if(bptable_size_override < bytes){
+                                       fprintf(stderr,"[E] --ptable-size (%" PRIu64 ") is smaller than required table size (%" PRIu64 ")\n", bptable_size_override, bytes);
+                                       exit(EXIT_FAILURE);
+                               }
+                               expected_map_bytes = bptable_size_override;
                        }
+                       uint64_t map_bytes = expected_map_bytes;
                        const char *fname = bptable_filename;
+                       struct stat st_existing;
+                       bool have_existing_ptable = false;
+                       if(fname && stat(fname, &st_existing) == 0){
+                               have_existing_ptable = true;
+                               /* Avoid silently clobbering a populated table when users forget --load-ptable. */
+                               if(st_existing.st_size > 0 && !FLAGLOADPTABLE && !FLAGFORCEPTABLEREBUILD){
+                                       if((uint64_t)st_existing.st_size != expected_map_bytes){
+                                               fprintf(stderr,
+                                                       "[E] Existing bP table size mismatch: expected %" PRIu64 " bytes but found %jd in %s\n",
+                                                       expected_map_bytes, (intmax_t)st_existing.st_size, fname);
+                                               fprintf(stderr,
+                                                       "    Use matching -n/-k or --ptable-size, or rebuild explicitly with --force-ptable-rebuild.\n");
+                                               exit(EXIT_FAILURE);
+                                       }
+                                       printf("[i] ptable: existing file %s detected; enabling --load-ptable (use --force-ptable-rebuild to overwrite)\n", fname);
+                                       FLAGLOADPTABLE = 1;
+                               }
+                       }
                        if(fname){
                                if(FLAGLOADPTABLE){
-                                       bptable_fd = open(fname,O_RDONLY);
+                                       double t_open = monotonic_ms();
+                                       bptable_fd = open(fname,O_RDONLY | O_CLOEXEC);
                                        if(bptable_fd < 0){
                                                fprintf(stderr,"[E] Cannot open bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
+                                       io_log_duration("ptable open (load)", t_open);
                                        struct stat st;
+                                       double t_fstat = monotonic_ms();
                                        if(fstat(bptable_fd,&st) != 0){
                                                fprintf(stderr,"[E] Cannot stat bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
-                                       map_bytes = st.st_size;
-                                       if(map_bytes < bytes){
-                                               fprintf(stderr,"[E] Existing bP table file too small\n");
+                                       io_log_duration("ptable fstat", t_fstat);
+                                       uint64_t actual_bytes = st.st_size;
+                                       if(actual_bytes != expected_map_bytes){
+                                               fprintf(stderr,"[E] Existing bP table size mismatch: expected %" PRIu64 " bytes but found %" PRIu64 "\n", expected_map_bytes, actual_bytes);
+                                               fprintf(stderr,"    Recreate the table or adjust --ptable-size.\n");
                                                exit(EXIT_FAILURE);
                                        }
+                                       printf("[+] ptable: LOADING read-only from %s bytes=%" PRIu64 "\n", fname, map_bytes);
+                                       log_file_allocation("ptable", bptable_fd, fname);
                                        FLAGREADEDFILE3 = 1;
                                }else{
-                                       bptable_fd = open(fname,O_RDWR | O_CREAT,0600);
+                                       double t_open = monotonic_ms();
+                                       bptable_fd = open(fname,O_RDWR | O_CREAT | O_CLOEXEC,0600);
                                        if(bptable_fd < 0){
                                                fprintf(stderr,"[E] Cannot create bP table file\n");
                                                exit(EXIT_FAILURE);
                                        }
-                                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
-                                               if(ftruncate(bptable_fd,map_bytes) != 0){
+                                       io_log_duration("ptable open", t_open);
+                                       if(!have_existing_ptable || st_existing.st_size == 0 || FLAGFORCEPTABLEREBUILD){
+                                               const char *action = (!have_existing_ptable || st_existing.st_size == 0) ? "CREATING" : "REBUILDING";
+                                               printf("[+] ptable: %s/TRUNCATING %s bytes=%" PRIu64 "\n", action, fname, map_bytes);
+                                               double t_trunc = monotonic_ms();
+                                               if(ftruncate(bptable_fd, map_bytes) != 0){
                                                        fprintf(stderr,"[E] Cannot resize bP table file\n");
                                                        exit(EXIT_FAILURE);
                                                }
+                                               io_log_duration("ptable ftruncate", t_trunc);
+                                               if(ptable_prealloc_policy == PTABLE_PREALLOC_FALLOCATE){
+                                                       double t_alloc = monotonic_ms();
+                                                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                                                               if(ftruncate(bptable_fd,map_bytes) != 0){
+                                                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                                                       exit(EXIT_FAILURE);
+                                                               }
+                                                       }
+                                                       io_log_duration("ptable posix_fallocate", t_alloc);
+                                               } else {
+                                                       io_logf("[io] ptable preallocation skipped for %s (sparse mode)", fname);
+                                               }
+                                       }else{
+                                               printf("[+] ptable: USING existing %s bytes=%" PRIu64 "\n", fname, map_bytes);
                                        }
                                }
                        }else{
@@ -1897,20 +2282,38 @@ free(hextemp);
                                if(!tmp || !*tmp) tmp = getenv("TMP");
                                if(!tmp || !*tmp) tmp = "/tmp";
                                snprintf(bptable_tmpfile,sizeof(bptable_tmpfile),"%s/bptableXXXXXX",tmp);
+                               double t_open = monotonic_ms();
                                bptable_fd = mkstemp(bptable_tmpfile);
                                if(bptable_fd < 0){
                                        fprintf(stderr,"[E] Cannot create bP table file\n");
                                        exit(EXIT_FAILURE);
                                }
-                               if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
-                                       if(ftruncate(bptable_fd,map_bytes) != 0){
-                                               fprintf(stderr,"[E] Cannot resize bP table file\n");
-                                               exit(EXIT_FAILURE);
+                               io_log_duration("ptable open", t_open);
+                               printf("[+] ptable: CREATING/TRUNCATING %s bytes=%" PRIu64 "\n", bptable_tmpfile, map_bytes);
+                               double t_trunc = monotonic_ms();
+                               if(ftruncate(bptable_fd, map_bytes) != 0){
+                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                       exit(EXIT_FAILURE);
+                               }
+                               io_log_duration("ptable ftruncate", t_trunc);
+                               if(ptable_prealloc_policy == PTABLE_PREALLOC_FALLOCATE){
+                                       double t_alloc = monotonic_ms();
+                                       if(posix_fallocate(bptable_fd,0,map_bytes) != 0){
+                                               if(ftruncate(bptable_fd,map_bytes) != 0){
+                                                       fprintf(stderr,"[E] Cannot resize bP table file\n");
+                                                       exit(EXIT_FAILURE);
+                                               }
+                                       }
+                                       io_log_duration("ptable posix_fallocate", t_alloc);
+                               } else {
+                                       io_logf("[io] ptable preallocation skipped for %s (sparse mode)", bptable_tmpfile);
                                        }
                                }
-                       }
+                       log_file_allocation("ptable", bptable_fd, fname ? fname : bptable_tmpfile);
                        int prot = FLAGLOADPTABLE ? PROT_READ : (PROT_READ|PROT_WRITE);
+                       double t_mmap = monotonic_ms();
                        void *map = mmap(NULL,map_bytes,prot,MAP_SHARED,bptable_fd,0);
+                       io_log_duration("ptable mmap", t_mmap);
                        if(map == MAP_FAILED){
                                fprintf(stderr,"[E] mmap failed for bP table\n");
                                exit(EXIT_FAILURE);
@@ -1920,9 +2323,15 @@ free(hextemp);
                        FLAGBPTABLEMAPPED = 1;
 #if !defined(_WIN64) || defined(__CYGWIN__)
                        if(bptable_bytes){
+                               if(FLAGMAPPEDWILLNEED){
 #if defined(MADV_WILLNEED)
-                               madvise(bPtable, bptable_bytes, MADV_WILLNEED);
+                                       double t_adv = monotonic_ms();
+                                       madvise(bPtable, bptable_bytes, MADV_WILLNEED);
+                                       io_log_duration("ptable madvise(WILLNEED)", t_adv);
+#else
+                                       fprintf(stderr,"[i] ptable: MADV_WILLNEED not supported; skipping\n");
 #endif
+                               }
 #if defined(MADV_SEQUENTIAL)
                                madvise(bPtable, bptable_bytes, MADV_SEQUENTIAL);
 #endif
@@ -4497,41 +4906,61 @@ void bsgs_myheapsort(struct bsgs_xvalue	*arr, int64_t n)	{
 	}
 }
 
-int bsgs_searchbinary(struct bsgs_xvalue *buffer,char *data,int64_t array_length,uint64_t *r_value) {
-        int64_t min,max,half,current;
-        int r = 0,rcmp;
-        min = 0;
-        current = 0;
-        max = array_length;
+int bsgs_searchbinary(struct bsgs_xvalue *buffer,char *data,int64_t array_length,uint64_t *range_start,uint64_t *range_end) {
+        if(array_length <= 0){
+                return 0;
+        }
+
+        const unsigned char *target = (unsigned char *)(data + 16);
+        int64_t lo = 0;
+        int64_t hi = array_length;
+
         if(FLAGBPTABLECACHE_READY){
                 uint8_t bucket = (uint8_t)data[16];
-                min = (int64_t)bptable_cache_boundaries[bucket];
-                max = (int64_t)bptable_cache_boundaries[bucket + 1];
-                current = min;
-                if(max <= min){
+                lo = (int64_t)bptable_cache_boundaries[bucket];
+                hi = (int64_t)bptable_cache_boundaries[bucket + 1];
+                if(hi <= lo){
                         return 0;
                 }
+                if(hi > array_length){
+                        hi = array_length;
+                }
         }
-        half = max - min;
-        while(!r && half >= 1) {
-                half = (max - min)/2;
-                rcmp = memcmp(data+16,buffer[current+half].value,BSGS_XVALUE_RAM);
-		if(rcmp == 0)	{
-			*r_value = buffer[current+half].index;
-			r = 1;
-		}
-		else	{
-			if(rcmp < 0) {
-				max = (max-half);
-			}
-			else	{
-				min = (min+half);
-			}
-			current = min;
-		}
-	}
-	return r;
+
+        while(lo < hi){
+                int64_t mid = lo + ((hi - lo) / 2);
+                int cmp = memcmp(buffer[mid].value, target, BSGS_XVALUE_RAM);
+                if(cmp < 0){
+                        lo = mid + 1;
+                } else {
+                        hi = mid;
+                }
+        }
+
+        if(lo >= array_length){
+                return 0;
+        }
+
+        if(memcmp(buffer[lo].value, target, BSGS_XVALUE_RAM) != 0){
+                return 0;
+        }
+
+        /* Scan neighbors to make sure we don’t miss duplicates/collisions */
+        int64_t left = lo;
+        while(left - 1 >= 0 && memcmp(buffer[left - 1].value, target, BSGS_XVALUE_RAM) == 0){
+                left--;
+        }
+        int64_t right = lo;
+        while(right + 1 < array_length && memcmp(buffer[right + 1].value, target, BSGS_XVALUE_RAM) == 0){
+                right++;
+        }
+
+        *range_start = buffer[left].index;
+        *range_end = buffer[right].index;
+
+        return (int)(right - left + 1);
 }
+
 
 #if defined(_WIN64) && !defined(__CYGWIN__)
 DWORD WINAPI thread_process_bsgs(LPVOID vargp) {
@@ -5174,7 +5603,7 @@ int bsgs_secondcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privateke
 }
 
 int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey)	{
-	uint64_t j = 0;
+	uint64_t j_start = 0, j_end = 0;
 	int i = 0,found = 0,r = 0;
 	Int base_key,calculatedkey;
 	Point base_point,point_aux;
@@ -5197,17 +5626,18 @@ int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey
 		BSGS_S.x.Get32Bytes((unsigned char *)xpoint_raw);
 		r = bloom_check(&bloom_bPx3rd[(uint8_t)xpoint_raw[0]],xpoint_raw,32);
 		if(r)	{
-			r = bsgs_searchbinary(bPtable,xpoint_raw,bsgs_m3,&j);
+			r = bsgs_searchbinary(bPtable,xpoint_raw,bsgs_m3,&j_start,&j_end);
 			if(r)	{
-				calcualteindex(i,&calculatedkey);
-				privatekey->Set(&calculatedkey);
-				privatekey->Add((uint64_t)(j+1));
-				privatekey->Add(&base_key);
-				point_aux = secp->ComputePublicKey(privatekey);
-				if(point_aux.x.IsEqual(&OriginalPointsBSGS[k_index].x))	{
-					found = 1;
-				}
-				else	{
+				for(uint64_t j = j_start; j <= j_end && !found; j++){
+					calcualteindex(i,&calculatedkey);
+					privatekey->Set(&calculatedkey);
+					privatekey->Add((uint64_t)(j+1));
+					privatekey->Add(&base_key);
+					point_aux = secp->ComputePublicKey(privatekey);
+					if(point_aux.x.IsEqual(&OriginalPointsBSGS[k_index].x))	{
+						found = 1;
+						break;
+					}
 					calcualteindex(i,&calculatedkey);
 					privatekey->Set(&calculatedkey);
 					privatekey->Sub((uint64_t)(j+1));
@@ -6602,18 +7032,27 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
 	printf("--rmd-batch-size n  Batch size for rmd160 scans (multiple of 4, max %d)\n", CPU_GRP_SIZE);
 	printf("--bsgs-block-count n  GGSB: split babies into n blocks (implies -B ggsb)\n");
 	printf("--bsgs-block-size n   GGSB: babies per block; derived count if only size is given\n");
-	printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
-	printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
-	printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
-	printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
-	printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
-	printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
+        printf("--mapped[=file]   Use or reuse a memory mapped bloom filter file instead of RAM\n");
+        printf("--mapped-size sz  Reserve sz bytes in the mapped bloom file (supports K/M/G/T)\n");
+        printf("--mapped-chunks n Split the mapped bloom filter into n chunk files\n");
+        printf("--mapped-dir dir  Directory for mapped bloom shard files (defaults to --tmpdir or cwd)\n");
+        printf("--mapped-error f  Target false-positive rate for mapped blooms (e.g., 1e-6)\n");
+        printf("--mapped-bpe f    Target bits-per-entry for mapped blooms (derives error)\n");
+        printf("--mapped-plan     Print mapped bloom sizing recommendations and exit\n");
+        printf("--mapped-populate {0,1}  Request MAP_POPULATE when memory-mapping blooms (default 0)\n");
+        printf("--mapped-willneed {0,1}  Request MADV_WILLNEED for mapped blooms/ptables (default 0)\n");
+        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
+        printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
+        printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
 	printf("--load-bloom       Require existing mapped bloom file; do not create a new one\n");
-	printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
-	printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
-	printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
-	printf("--ptable-cache   Enable cached lookup metadata for the mapped bP table when using --load-ptable\n");
-	printf("--tmpdir dir     Directory for temporary files\n");
+        printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
+        printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
+        printf("--ptable-prealloc {none,fallocate}  Choose sparse default or explicit full preallocation\n");
+        printf("--load-ptable    Load existing bP table file instead of creating new (requires --ptable)\n");
+        printf("--force-ptable-rebuild  Overwrite any existing bP table file when creating mapped tables\n");
+        printf("--ptable-cache   Enable cached lookup metadata for the mapped bP table when using --load-ptable\n");
+        printf("--io-verbose     Print timing for IO-heavy syscalls (open/mmap/madvise/ftruncate)\n");
+        printf("--tmpdir dir     Directory for temporary files\n");
 	printf("\nValid n and maximum k values:\n");
         print_nk_table();
         printf("\nExample:\n\n");
@@ -7578,7 +8017,31 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
 
 
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname) {
-        const char *mapname = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+        std::string map_path = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+        if (!map_path.empty() && map_path[0] != '/' && map_path.find(":/") == std::string::npos) {
+                const char *dir_hint = NULL;
+                if (mapped_dir && *mapped_dir) {
+                        dir_hint = mapped_dir;
+                } else if (tmpdir_path && *tmpdir_path) {
+                        dir_hint = tmpdir_path;
+                }
+                if (dir_hint && *dir_hint) {
+                        map_path = std::string(dir_hint) + "/" + map_path;
+                }
+        }
+        std::string parent_dir = path_dirname(map_path);
+        if (!parent_dir.empty()) {
+                bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
+                if (!ensure_directory_exists(parent_dir, readonly)) {
+                        return false;
+                }
+        }
+
+        bloom_set_readonly(FLAGLOADBLOOM || FLAGMAPPEDREADONLY);
+        bloom_set_populate(FLAGMAPPEDPOPULATE);
+        bloom_set_willneed(FLAGMAPPEDWILLNEED);
+
+        const char *mapname = map_path.c_str();
         uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
 
         if(FLAGMAPPED) {
