@@ -170,6 +170,17 @@ int md5_file(const char *path, uint8_t digest[16]) {
         return 0;
 }
 
+int md5_buffer(const uint8_t *data, size_t len, uint8_t digest[16]) {
+        if (!data || !digest) {
+                return -1;
+        }
+        md5_ctx ctx;
+        md5_init(&ctx);
+        md5_update(&ctx, data, len);
+        md5_final(&ctx, digest);
+        return 0;
+}
+
 void md5_to_hex(const uint8_t digest[16], char hex[33]) {
         static const char hexdigits[] = "0123456789abcdef";
         if (!digest || !hex) {

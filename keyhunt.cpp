@@ -565,6 +565,7 @@ const char *mapped_filename = NULL;
 const char *mapped_dir = NULL;
 const char *worker_outdir = NULL;
 uint32_t worker_id = 0;
+uint32_t worker_total = 1;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
 long double mapped_bpe_override = 0;
@@ -584,7 +585,9 @@ enum PtablePreallocPolicy {
 
 int ptable_prealloc_policy = PTABLE_PREALLOC_NONE;
 
+const char *bptable_filename_cli = NULL;
 const char *bptable_filename = NULL;
+std::string bptable_resolved_path;
 uint64_t bptable_size_override = 0;
 int bptable_fd = -1;
 uint64_t bptable_bytes = 0;
@@ -601,6 +604,10 @@ const char *tmpdir_path = NULL;
 int KFACTOR = 1;
 int MAXLENGTHADDRESS = -1;
 int NTHREADS = 1;
+uint64_t ptable_entries_total = 0;
+uint64_t ptable_slice_start = 0;
+uint64_t ptable_slice_len = 0;
+uint64_t ptable_slice_end = 0;
 
 static std::string path_dirname(const std::string &input) {
         size_t pos = input.find_last_of("/\\");
@@ -689,6 +696,125 @@ static std::string resolve_bloom_path_for_worker(const std::string &base_path, b
                 dir.push_back('/');
         }
         return dir + fname;
+}
+
+static std::string resolve_ptable_path_for_worker(const std::string &base_path, bool readonly) {
+        if (base_path.empty()) {
+                return std::string();
+        }
+        std::string fname = path_basename(base_path);
+        std::string dir = worker_directory_for_path(path_dirname(base_path));
+        if (!ensure_directory_exists(dir, readonly)) {
+                return std::string();
+        }
+        if (!dir.empty() && dir.back() != '/') {
+                dir.push_back('/');
+        }
+        return dir + fname;
+}
+
+static void compute_worker_slice(uint64_t total_entries, uint32_t id, uint32_t total, uint64_t *start, uint64_t *len) {
+        if (!start || !len) {
+                return;
+        }
+        if (total == 0) {
+                total = 1;
+        }
+        if (id >= total) {
+                fprintf(stderr, "[E] worker-id (%u) must be less than worker-total (%u)\n", id, total);
+                exit(EXIT_FAILURE);
+        }
+        uint64_t base = total_entries / total;
+        uint64_t remainder = total_entries % total;
+        uint64_t offset = base * id + ((uint64_t)id < remainder ? (uint64_t)id : remainder);
+        uint64_t span = base + (((uint64_t)id < remainder) ? 1 : 0);
+        *start = offset;
+        *len = span;
+}
+
+static void write_worker_metadata(const std::string &ptable_path, bool md5_ready) {
+        if(worker_total <= 1){
+                return;
+        }
+        std::string meta_dir;
+        if(!ptable_path.empty()){
+                meta_dir = path_dirname(ptable_path);
+                if(meta_dir.empty()){
+                        meta_dir = ".";
+                }
+                meta_dir = worker_directory_for_path(meta_dir);
+        } else {
+                meta_dir = worker_directory_for_path(".");
+        }
+        if(meta_dir.empty()){
+                meta_dir = ".";
+        }
+        if(!ensure_directory_exists(meta_dir, false)){
+                fprintf(stderr,"[W] Unable to create metadata directory %s\n", meta_dir.c_str());
+                return;
+        }
+        std::string base_name = ptable_path.empty() ? "bptable" : path_basename(ptable_path);
+        std::string meta_path = meta_dir;
+        if(!meta_path.empty() && meta_path.back() != '/'){
+                meta_path.push_back('/');
+        }
+        char meta_file[256];
+        snprintf(meta_file, sizeof(meta_file), "%s.worker%" PRIu32 ".meta", base_name.c_str(), worker_id);
+        meta_path += meta_file;
+        char md5_hex[33] = {0};
+        if(md5_ready){
+                md5_to_hex(bptable_md5, md5_hex);
+        }
+        char *n_hex = BSGS_N.GetBase16();
+        char *range_start_hex = n_range_start.GetBase16();
+        char *range_end_hex = n_range_end.GetBase16();
+        FILE *meta = fopen(meta_path.c_str(), "w");
+        if(!meta){
+                fprintf(stderr,"[W] Unable to write worker metadata to %s\n", meta_path.c_str());
+        } else {
+                fprintf(meta,
+                        "worker_id=%" PRIu32 "\n"
+                        "worker_total=%" PRIu32 "\n"
+                        "ptable_path=%s\n"
+                        "ptable_slice_start=%" PRIu64 "\n"
+                        "ptable_slice_end=%" PRIu64 "\n"
+                        "ptable_slice_len=%" PRIu64 "\n"
+                        "ptable_entries_total=%" PRIu64 "\n"
+                        "N=0x%s\n"
+                        "k=%d\n"
+                        "M=%" PRIu64 "\n"
+                        "M2=%" PRIu64 "\n"
+                        "M3=%" PRIu64 "\n"
+                        "block_count=%" PRIu64 "\n"
+                        "block_size=%" PRIu64 "\n"
+                        "mapped_chunks=%" PRIu32 "\n"
+                        "range_start=0x%s\n"
+                        "range_end=0x%s\n"
+                        "ptable_md5=%s\n",
+                        worker_id,
+                        worker_total,
+                        ptable_path.empty() ? "(memory)" : ptable_path.c_str(),
+                        ptable_slice_start,
+                        ptable_slice_end,
+                        ptable_slice_len,
+                        ptable_entries_total,
+                        n_hex,
+                        KFACTOR,
+                        (uint64_t)bsgs_m,
+                        (uint64_t)bsgs_m2,
+                        (uint64_t)bsgs_m3,
+                        (uint64_t)bsgs_ggsb.block_count,
+                        (uint64_t)bsgs_ggsb.block_size,
+                        mapped_chunks,
+                        range_start_hex,
+                        range_end_hex,
+                        md5_ready ? md5_hex : "(unavailable)");
+                fclose(meta);
+                printf("[i] Worker metadata saved to %s\n", meta_path.c_str());
+        }
+        free(n_hex);
+        free(range_start_hex);
+        free(range_end_hex);
 }
 
 static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix) {
@@ -966,6 +1092,7 @@ int main(int argc, char **argv)	{
                {"mapped-populate", required_argument, 0, 0},
                {"mapped-willneed", required_argument, 0, 0},
                {"worker-id", required_argument, 0, 0},
+               {"worker-total", required_argument, 0, 0},
                {"worker-outdir", required_argument, 0, 0},
                {"bloom-file", required_argument, 0, 0},
                {"load-bloom", no_argument, 0, 0},
@@ -1045,6 +1172,12 @@ int main(int argc, char **argv)	{
                              }
                      } else if (strcmp(long_options[option_index].name, "worker-id") == 0) {
                              worker_id = (uint32_t)strtoul(optarg, NULL, 10);
+                     } else if (strcmp(long_options[option_index].name, "worker-total") == 0) {
+                             worker_total = (uint32_t)strtoul(optarg, NULL, 10);
+                             if(worker_total == 0){
+                                     fprintf(stderr, "[W] --worker-total must be at least 1; defaulting to 1\n");
+                                     worker_total = 1;
+                             }
                      } else if (strcmp(long_options[option_index].name, "worker-outdir") == 0) {
                              worker_outdir = optarg;
                      } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
@@ -1054,7 +1187,8 @@ int main(int argc, char **argv)	{
                      } else if (strcmp(long_options[option_index].name, "loadbloom") == 0) {
                               FLAGLOADBLOOM = 1;
                       } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
-                              bptable_filename = optarg;
+                              bptable_filename_cli = optarg;
+                              bptable_filename = bptable_filename_cli;
                       } else if (strcmp(long_options[option_index].name, "ptable-size") == 0) {
                               char *end;
                               uint64_t desired = strtoull(optarg, &end, 10);
@@ -1453,6 +1587,14 @@ int main(int argc, char **argv)	{
 			break;
                }
        }
+
+if(worker_total == 0){
+        worker_total = 1;
+}
+if(worker_id >= worker_total){
+        fprintf(stderr, "[E] worker-id (%u) must be less than worker-total (%u)\n", worker_id, worker_total);
+        exit(EXIT_FAILURE);
+}
 
 if (FLAGLOADPTABLE && !bptable_filename) {
 fprintf(stderr, "--load-ptable requires --ptable <file>\n");
@@ -1913,6 +2055,25 @@ BSGS_M2_double.Mult(&BSGS_M2);
 		
 		bsgs_m2 =  BSGS_M2.GetInt64();
 		bsgs_m3 =  BSGS_M3.GetInt64();
+                ptable_entries_total = bsgs_m3;
+                compute_worker_slice(ptable_entries_total, worker_id, worker_total, &ptable_slice_start, &ptable_slice_len);
+                if(ptable_slice_len == 0){
+                        fprintf(stderr, "[E] worker %" PRIu32 " slice is empty (total entries=%" PRIu64 ")\n", worker_id, ptable_entries_total);
+                        exit(EXIT_FAILURE);
+                }
+                ptable_slice_end = ptable_slice_start + ptable_slice_len;
+                if(worker_total > 1){
+                        printf("[i] worker slice %" PRIu32 "/%" PRIu32 ": start=%" PRIu64 " end=%" PRIu64 " len=%" PRIu64 "\n",
+                               worker_id,
+                               worker_total,
+                               ptable_slice_start,
+                               ptable_slice_end,
+                               ptable_slice_len);
+                }
+                if(ptable_slice_len > (uint64_t)std::numeric_limits<int64_t>::max()){
+                        fprintf(stderr,"[E] bP slice too large to handle (%" PRIu64 " entries)\n", ptable_slice_len);
+                        exit(EXIT_FAILURE);
+                }
 		
 		BSGS_AUX.Set(&BSGS_N);
 		BSGS_AUX.Div(&BSGS_M);
@@ -2213,8 +2374,30 @@ free(hextemp);
 			BSGS_AMP3[i].Reduce();
 		}
 
-               bytes = (uint64_t)bsgs_m3 * (uint64_t) sizeof(struct bsgs_xvalue);
-               printf("[+] Allocating %.2f MB for %" PRIu64  " bP Points\n",(double)(bytes/1048576),bsgs_m3);
+               if(bptable_filename_cli){
+                       std::string resolved = resolve_ptable_path_for_worker(bptable_filename_cli, FLAGLOADPTABLE);
+                       if(resolved.empty()){
+                               fprintf(stderr,"[E] Unable to prepare bP table path for %s\n", bptable_filename_cli);
+                               exit(EXIT_FAILURE);
+                       }
+                       if(worker_id > 0 && resolved != bptable_filename_cli){
+                               printf("[i] worker %" PRIu32 " ptable path: %s (base %s)\n", worker_id, resolved.c_str(), bptable_filename_cli);
+                       }
+                       bptable_resolved_path = resolved;
+                       bptable_filename = bptable_resolved_path.c_str();
+               } else {
+                       bptable_resolved_path.clear();
+                       bptable_filename = NULL;
+               }
+
+               bytes = (uint64_t)ptable_slice_len * (uint64_t) sizeof(struct bsgs_xvalue);
+               double slice_mb = (double)bytes / 1048576.0;
+               double total_ptable_mb = (double)((uint64_t)ptable_entries_total * (uint64_t)sizeof(struct bsgs_xvalue)) / 1048576.0;
+               printf("[+] Allocating %.2f MB for %" PRIu64  " bP Points", slice_mb, ptable_slice_len);
+               if(worker_total > 1){
+                       printf(" (slice %" PRIu64 "-%" PRIu64 " of %" PRIu64 ", ~%.2f MB global)", ptable_slice_start, ptable_slice_end, ptable_entries_total, total_ptable_mb);
+               }
+               printf("\n");
 
                int use_mmap = FLAGMAPPED || bptable_filename != NULL || bptable_size_override != 0;
                uint64_t total = get_total_ram();
@@ -2426,7 +2609,7 @@ free(hextemp);
                        }
                }
 
-		if(worker_id == 0 && FLAGSAVEREADFILE && !FLAGMAPPED)	{
+		if(worker_id == 0 && worker_total == 1 && FLAGSAVEREADFILE && !FLAGMAPPED)	{
 			/*Reading file for 1st bloom filter */
 
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_4_%" PRIu64 ".blm",bsgs_m);
@@ -2678,8 +2861,11 @@ free(hextemp);
 			else	{
 				FLAGREADEDFILE4 = 0;
 			}
-			
+				
 		}
+                bool slice_md5_ready = FLAGBPTABLEMD5_READY;
+                bool slice_md5_warned = false;
+                uint64_t slice_bytes_calc = (uint64_t)ptable_slice_len * (uint64_t)sizeof(struct bsgs_xvalue);
 		
 		if((!FLAGREADEDFILE1 || !FLAGREADEDFILE2 || !FLAGREADEDFILE4) || (!FLAGLOADPTABLE && !FLAGREADEDFILE3))   {
 			if(FLAGREADEDFILE1 == 1)	{
@@ -2939,15 +3125,15 @@ free(hextemp);
 			fflush(stdout);
 		}	
 		if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)   {
-                printf("[+] Sorting %" PRIu64 " elements... ",bsgs_m3);
+                printf("[+] Sorting %" PRIu64 " elements (offset %" PRIu64 ")... ",ptable_slice_len, ptable_slice_start);
 			fflush(stdout);
-			bsgs_sort(bPtable,bsgs_m3);
+			bsgs_sort(bPtable,(int64_t)ptable_slice_len);
 			sha256((uint8_t*)bPtable, bytes,(uint8_t*) checksum);
 			memcpy(checksum_backup,checksum,32);
 			printf("Done!\n");
 			fflush(stdout);
 		}
-		if(worker_id == 0 && (FLAGSAVEREADFILE || FLAGUPDATEFILE1))	{
+		if(worker_id == 0 && worker_total == 1 && (FLAGSAVEREADFILE || FLAGUPDATEFILE1))	{
 			if(!FLAGREADEDFILE1 || FLAGUPDATEFILE1)	{
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_4_%" PRIu64 ".blm",bsgs_m);
 				
@@ -3098,6 +3284,19 @@ free(hextemp);
 		}
 
 
+		if(slice_bytes_calc > std::numeric_limits<size_t>::max()){
+			if(!slice_md5_warned){
+				fprintf(stderr,"[W] Unable to compute MD5 for bP slice: size exceeds addressable space\n");
+				slice_md5_warned = true;
+			}
+		} else if(md5_buffer((const uint8_t*)bPtable, (size_t)slice_bytes_calc, bptable_md5) == 0){
+			FLAGBPTABLEMD5_READY = 1;
+			slice_md5_ready = true;
+		} else if(!slice_md5_ready && !slice_md5_warned){
+			fprintf(stderr,"[W] Unable to compute MD5 for bP table slice\n");
+			slice_md5_warned = true;
+		}
+
                 if(FLAGPTABLECACHE && bptable_filename){
                         if(!FLAGBPTABLEMD5_READY){
                                 if(md5_file(bptable_filename, bptable_md5) == 0){
@@ -3114,7 +3313,7 @@ free(hextemp);
                         if(FLAGBPTABLEMD5_READY){
                                 char cache_path[4096];
                                 snprintf(cache_path, sizeof(cache_path), "%s.cache", bptable_filename);
-                                int cache_status = load_bptable_cache(cache_path, bptable_md5, bsgs_m3);
+                                int cache_status = load_bptable_cache(cache_path, bptable_md5, ptable_slice_len);
                                 if(cache_status == 1){
                                         printf("[+] bP table cache hit (%s)\n", cache_path);
                                 }else{
@@ -3123,24 +3322,46 @@ free(hextemp);
                                         }else{
                                                 printf("[I] bP table cache not found (%s); creating\n", cache_path);
                                         }
-                                        build_bptable_cache(bsgs_m3);
-                                        if(save_bptable_cache(cache_path, bptable_md5, bsgs_m3) == 0){
+                                        build_bptable_cache(ptable_slice_len);
+                                        if(save_bptable_cache(cache_path, bptable_md5, ptable_slice_len) == 0){
                                                 printf("[+] bP table cache refreshed (%s)\n", cache_path);
                                         }else{
                                                 printf("[W] Unable to write bP table cache to %s\n", cache_path);
                                         }
                                 }
                         }else{
-                                build_bptable_cache(bsgs_m3);
+                                build_bptable_cache(ptable_slice_len);
                         }
                 }else{
                         FLAGBPTABLECACHE_READY = 0;
+                }
+                if(FLAGBPTABLEMD5_READY){
+                        slice_md5_ready = true;
                 }
 
                 if(!FLAGREADEDFILE1) FLAGREADEDFILE1 = 1;
                 if(!FLAGREADEDFILE2) FLAGREADEDFILE2 = 1;
                 if(!FLAGREADEDFILE4) FLAGREADEDFILE4 = 1;
 		i = 0;
+
+		if(!slice_md5_ready){
+			if(slice_bytes_calc > std::numeric_limits<size_t>::max()){
+				if(!slice_md5_warned){
+					fprintf(stderr,"[W] Unable to compute MD5 for bP slice: size exceeds addressable space\n");
+					slice_md5_warned = true;
+				}
+			} else if(md5_buffer((const uint8_t*)bPtable, (size_t)slice_bytes_calc, bptable_md5) == 0){
+				FLAGBPTABLEMD5_READY = 1;
+				slice_md5_ready = true;
+			} else if(!slice_md5_warned){
+				fprintf(stderr,"[W] Unable to compute MD5 for bP table slice\n");
+				slice_md5_warned = true;
+			}
+		}
+		if(worker_total > 1){
+			std::string ptable_path = bptable_filename ? std::string(bptable_filename) : std::string();
+			write_worker_metadata(ptable_path, slice_md5_ready);
+		}
 
 		bsgs_steps_total.store(0);
 		steps = new(std::nothrow) std::atomic<uint64_t>[NTHREADS];
@@ -5673,7 +5894,7 @@ int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey
 		BSGS_S.x.Get32Bytes((unsigned char *)xpoint_raw);
 		r = bloom_check(&bloom_bPx3rd[(uint8_t)xpoint_raw[0]],xpoint_raw,32);
 		if(r)	{
-			r = bsgs_searchbinary(bPtable,xpoint_raw,bsgs_m3,&j_start,&j_end);
+			r = bsgs_searchbinary(bPtable,xpoint_raw,(int64_t)ptable_slice_len,&j_start,&j_end);
 			if(r)	{
 				for(uint64_t j = j_start; j <= j_end && !found; j++){
 					calcualteindex(i,&calculatedkey);
@@ -5867,15 +6088,17 @@ void *thread_bPload(void *vargp)	{
 				printf("%i : %s : %i\n",i_counter,hexraw,bloom_bP_index);
 			}
 			*/
-			if(i_counter < bsgs_m3)	{
-				if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)    {
-					memcpy(bPtable[i_counter].value,rawvalue+16,BSGS_XVALUE_RAM);
-					bPtable[i_counter].index = i_counter;
-				}
-				if(!FLAGREADEDFILE4)	{
-                                        bloom_add(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
-				}
-			}
+                        bool ptable_slot = (i_counter >= ptable_slice_start && i_counter < ptable_slice_end);
+                        if(ptable_slot){
+                                uint64_t local_index = i_counter - ptable_slice_start;
+                                if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)    {
+                                        memcpy(bPtable[local_index].value,rawvalue+16,BSGS_XVALUE_RAM);
+                                        bPtable[local_index].index = i_counter;
+                                }
+                        }
+                        if(i_counter < bsgs_m3 && !FLAGREADEDFILE4)   {
+                                bloom_add(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+                        }
 			if(i_counter < bsgs_m2 && !FLAGREADEDFILE2)	{
                                 bloom_add(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 			}
@@ -6026,15 +6249,17 @@ void *thread_bPload_2blooms(void *vargp)	{
 		for(j=0;j<CPU_GRP_SIZE;j++)	{
 			pts[j].x.Get32Bytes((unsigned char*)rawvalue);
 			bloom_bP_index = (uint8_t)rawvalue[0];
-			if(i_counter < bsgs_m3)	{
-				if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)    {
-					memcpy(bPtable[i_counter].value,rawvalue+16,BSGS_XVALUE_RAM);
-					bPtable[i_counter].index = i_counter;
-				}
-				if(!FLAGREADEDFILE4)	{
-                                        bloom_add(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
-				}
-			}
+                        bool ptable_slot = (i_counter >= ptable_slice_start && i_counter < ptable_slice_end);
+                        if(ptable_slot){
+                                uint64_t local_index = i_counter - ptable_slice_start;
+                                if(!FLAGLOADPTABLE && !FLAGREADEDFILE3)    {
+                                        memcpy(bPtable[local_index].value,rawvalue+16,BSGS_XVALUE_RAM);
+                                        bPtable[local_index].index = i_counter;
+                                }
+                        }
+                        if(i_counter < bsgs_m3 && !FLAGREADEDFILE4)   {
+                                bloom_add(&bloom_bPx3rd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
+                        }
 			if(i_counter < bsgs_m2 && !FLAGREADEDFILE2)	{
                                         bloom_add(&bloom_bPx2nd[bloom_bP_index], rawvalue, BSGS_BUFFERXPOINTLENGTH);
 			}
@@ -7089,6 +7314,7 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
         printf("--mapped-populate {0,1}  Request MAP_POPULATE when memory-mapping blooms (default 0)\n");
         printf("--mapped-willneed {0,1}  Request MADV_WILLNEED for mapped blooms/ptables (default 0)\n");
         printf("--worker-id n     Worker index for sharded bloom outputs (default 0)\n");
+        printf("--worker-total n  Total workers responsible for bP table slices (default 1)\n");
         printf("--worker-outdir dir  Base directory for worker-local bloom files\n");
         printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
         printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
