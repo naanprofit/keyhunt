@@ -67,6 +67,20 @@ To reuse an existing bP table, combine `--load-ptable` with `--ptable`. By
 default the file is created in the system temporary directory; use `--tmpdir
 <dir>` or set `TEMP`/`TMPDIR` to choose a different location.
 
+### Distributed precomputation
+
+When your bloom shards and bP table live on a shared filesystem, you can split
+the baby-step generation across multiple hosts. Provide each worker with the
+same parameters plus distinct `--bsgs-worker-id` values (0-indexed) and set
+`--bsgs-worker-total` to the total worker count. Point `--mapped` and
+`--ptable` at the shared paths so every worker contributes to the same files.
+Use `--skip-bsgs-finalize` on the workers that should only generate their
+assigned slice; run one final pass without that flag after all workers finish
+so the shared bP table is sorted and its checksums are refreshed.
+Workers with `--bsgs-worker-id > 0` refuse to truncate/allocate the shared
+files and require worker 0 (or a dedicated coordinator run) to create the
+mapped bloom shards and ptable beforehand.
+
 ## Free Code
 
 This code is free of charge, see the licence for more details. https://github.com/albertobsd/keyhunt/blob/main/LICENSE
