@@ -19,6 +19,10 @@ email: albertobsd@gmail.com
 #include <inttypes.h>
 #include <errno.h>
 #include <ctype.h>
+#include <map>
+#include <set>
+#include <fstream>
+#include <algorithm>
 #include "base58/libbase58.h"
 #include "rmd160/rmd160.h"
 #include "oldbloom/oldbloom.h"
@@ -52,11 +56,20 @@ email: albertobsd@gmail.com
 #include <fcntl.h>
 #include <sys/statvfs.h>
 #include <sys/stat.h>
+#include <glob.h>
+#include <dirent.h>
 #endif
 
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
 #endif
+
+extern Int BSGS_N;
+extern Int n_range_start;
+extern Int n_range_end;
+extern uint64_t bsgs_m;
+extern uint64_t bsgs_m2;
+extern uint64_t bsgs_m3;
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
@@ -601,6 +614,7 @@ unsigned char bptable_md5[16];
 int FLAGBPTABLEMD5_READY = 0;
 char bptable_tmpfile[4096];
 const char *tmpdir_path = NULL;
+const char *bsgs_merge_from = NULL;
 int KFACTOR = 1;
 int MAXLENGTHADDRESS = -1;
 int NTHREADS = 1;
@@ -608,6 +622,7 @@ uint64_t ptable_entries_total = 0;
 uint64_t ptable_slice_start = 0;
 uint64_t ptable_slice_len = 0;
 uint64_t ptable_slice_end = 0;
+int FLAGBSGSMERGEONLY = 0;
 
 static std::string path_dirname(const std::string &input) {
         size_t pos = input.find_last_of("/\\");
@@ -661,7 +676,9 @@ static bool ensure_directory_exists(const std::string &dir, bool readonly) {
         return true;
 }
 
-static std::string worker_directory_for_path(const std::string &base_dir) {
+static std::string worker_directory_for_path(const std::string &base_dir, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max()) {
+        uint32_t id = (worker_override == std::numeric_limits<uint32_t>::max()) ? worker_id : worker_override;
+        uint32_t total = (total_override == std::numeric_limits<uint32_t>::max()) ? worker_total : total_override;
         std::string dir = (worker_outdir && *worker_outdir) ? worker_outdir : base_dir;
         if (dir.empty()) {
                 dir = ".";
@@ -669,9 +686,9 @@ static std::string worker_directory_for_path(const std::string &base_dir) {
         if (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\')) {
                 dir.pop_back();
         }
-        if (worker_id > 0) {
+        if (id > 0) {
                 char worker_label[32];
-                snprintf(worker_label, sizeof(worker_label), "worker%u", worker_id);
+                snprintf(worker_label, sizeof(worker_label), "worker%u", id);
                 std::string last = path_basename(dir);
                 if (last != worker_label) {
                         if (!dir.empty() && dir.back() != '/') {
@@ -679,16 +696,18 @@ static std::string worker_directory_for_path(const std::string &base_dir) {
                         }
                         dir += worker_label;
                 }
+        } else if (total > 1) {
+                // allow caller to force a stable non-worker path even when total_override > 1
         }
         return dir;
 }
 
-static std::string resolve_bloom_path_for_worker(const std::string &base_path, bool readonly) {
+static std::string resolve_bloom_path_for_worker(const std::string &base_path, bool readonly, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max()) {
         if (base_path.empty()) {
                 return std::string();
         }
         std::string fname = path_basename(base_path);
-        std::string dir = worker_directory_for_path(path_dirname(base_path));
+        std::string dir = worker_directory_for_path(path_dirname(base_path), worker_override, total_override);
         if (!ensure_directory_exists(dir, readonly)) {
                 return std::string();
         }
@@ -698,12 +717,12 @@ static std::string resolve_bloom_path_for_worker(const std::string &base_path, b
         return dir + fname;
 }
 
-static std::string resolve_ptable_path_for_worker(const std::string &base_path, bool readonly) {
+static std::string resolve_ptable_path_for_worker(const std::string &base_path, bool readonly, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max()) {
         if (base_path.empty()) {
                 return std::string();
         }
         std::string fname = path_basename(base_path);
-        std::string dir = worker_directory_for_path(path_dirname(base_path));
+        std::string dir = worker_directory_for_path(path_dirname(base_path), worker_override, total_override);
         if (!ensure_directory_exists(dir, readonly)) {
                 return std::string();
         }
@@ -817,7 +836,7 @@ static void write_worker_metadata(const std::string &ptable_path, bool md5_ready
         free(range_end_hex);
 }
 
-static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix) {
+static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max()) {
         std::string mf = mapped_filename ? mapped_filename : "";
         bool ends_with_sep = (!mf.empty() && (mf.back() == '/' || mf.back() == '\\'));
         std::string mf_dir;
@@ -866,7 +885,7 @@ static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const
         fullpath += shard_name;
 
         bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
-        std::string routed = resolve_bloom_path_for_worker(fullpath, readonly);
+        std::string routed = resolve_bloom_path_for_worker(fullpath, readonly, worker_override, total_override);
         if (routed.empty()) {
                 fprintf(stderr, "[E] Unable to prepare bloom shard path for %s\n", fullpath.c_str());
                 exit(EXIT_FAILURE);
@@ -874,6 +893,592 @@ static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const
         return routed;
 }
 
+struct WorkerMeta {
+        uint32_t worker_id = 0;
+        uint32_t worker_total = 0;
+        uint64_t ptable_slice_start = 0;
+        uint64_t ptable_slice_end = 0;
+        uint64_t ptable_slice_len = 0;
+        uint64_t ptable_entries_total = 0;
+        uint64_t M = 0;
+        uint64_t M2 = 0;
+        uint64_t M3 = 0;
+        uint64_t block_count = 0;
+        uint64_t block_size = 0;
+        uint32_t mapped_chunks_meta = 1;
+        int kfactor = 0;
+        std::string N_hex;
+        std::string range_start_hex;
+        std::string range_end_hex;
+        std::string ptable_path;
+        std::string meta_dir;
+        std::string meta_path;
+        std::string ptable_md5_hex;
+        bool has_ptable_md5 = false;
+};
+
+static bool parse_uint64(const std::map<std::string, std::string> &kv, const char *key, uint64_t *out) {
+        auto it = kv.find(key);
+        if (it == kv.end()) return false;
+        const std::string &v = it->second;
+        int base = (v.size() > 2 && v[0] == '0' && (v[1] == 'x' || v[1] == 'X')) ? 16 : 10;
+        char *endptr = NULL;
+        errno = 0;
+        uint64_t val = strtoull(v.c_str(), &endptr, base);
+        if (errno != 0 || (endptr && *endptr != '\0')) {
+                return false;
+        }
+        *out = val;
+        return true;
+}
+
+static bool parse_uint32(const std::map<std::string, std::string> &kv, const char *key, uint32_t *out) {
+        uint64_t tmp = 0;
+        if (!parse_uint64(kv, key, &tmp)) return false;
+        *out = (uint32_t)tmp;
+        return true;
+}
+
+static bool parse_hex_int(const std::string &s, Int &dst) {
+        std::string clean = s;
+        if (clean.size() > 2 && clean[0] == '0' && (clean[1] == 'x' || clean[1] == 'X')) {
+                clean = clean.substr(2);
+        }
+        if (clean.empty()) return false;
+        dst.SetBase16(clean.c_str());
+        return true;
+}
+
+static bool parse_worker_meta_file(const std::string &path, WorkerMeta *out) {
+        std::ifstream in(path.c_str());
+        if (!in.is_open()) {
+            fprintf(stderr, "[E] Unable to open worker metadata %s\n", path.c_str());
+            return false;
+        }
+        std::map<std::string, std::string> kv;
+        std::string line;
+        while (std::getline(in, line)) {
+                if (line.empty()) continue;
+                size_t eq = line.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = line.substr(0, eq);
+                std::string val = line.substr(eq + 1);
+                kv[key] = val;
+        }
+        WorkerMeta meta;
+        meta.meta_path = path;
+        meta.meta_dir = path_dirname(path);
+        if (!parse_uint32(kv, "worker_id", &meta.worker_id)) return false;
+        if (!parse_uint32(kv, "worker_total", &meta.worker_total)) return false;
+        if (!parse_uint64(kv, "ptable_slice_start", &meta.ptable_slice_start)) return false;
+        if (!parse_uint64(kv, "ptable_slice_end", &meta.ptable_slice_end)) return false;
+        if (!parse_uint64(kv, "ptable_slice_len", &meta.ptable_slice_len)) return false;
+        if (!parse_uint64(kv, "ptable_entries_total", &meta.ptable_entries_total)) return false;
+        if (!parse_uint64(kv, "M", &meta.M)) return false;
+        if (!parse_uint64(kv, "M2", &meta.M2)) return false;
+        if (!parse_uint64(kv, "M3", &meta.M3)) return false;
+        if (!parse_uint64(kv, "block_count", &meta.block_count)) return false;
+        if (!parse_uint64(kv, "block_size", &meta.block_size)) return false;
+        if (!parse_uint32(kv, "mapped_chunks", &meta.mapped_chunks_meta)) return false;
+        uint32_t k_tmp = 0;
+        if (!parse_uint32(kv, "k", &k_tmp)) return false;
+        meta.kfactor = (int)k_tmp;
+        auto n_it = kv.find("N");
+        if (n_it == kv.end()) return false;
+        meta.N_hex = n_it->second;
+        auto rs_it = kv.find("range_start");
+        auto re_it = kv.find("range_end");
+        if (rs_it != kv.end()) meta.range_start_hex = rs_it->second;
+        if (re_it != kv.end()) meta.range_end_hex = re_it->second;
+        auto path_it = kv.find("ptable_path");
+        if (path_it == kv.end()) return false;
+        meta.ptable_path = path_it->second;
+        auto md5_it = kv.find("ptable_md5");
+        if (md5_it != kv.end()) {
+                if (md5_it->second != "(unavailable)") {
+                        if (md5_it->second.size() == 32) {
+                                meta.ptable_md5_hex = md5_it->second;
+                                meta.has_ptable_md5 = true;
+                        }
+                }
+        }
+        if (meta.ptable_slice_start + meta.ptable_slice_len != meta.ptable_slice_end) {
+                fprintf(stderr, "[E] Worker %" PRIu32 " metadata slice length mismatch (%" PRIu64 " + %" PRIu64 " != %" PRIu64 ")\n",
+                        meta.worker_id, meta.ptable_slice_start, meta.ptable_slice_len, meta.ptable_slice_end);
+                return false;
+        }
+        *out = meta;
+        return true;
+}
+
+static bool expand_glob_or_dir(const std::string &pattern, std::vector<std::string> *out) {
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        WIN32_FIND_DATAA ffd;
+        std::string search = pattern;
+        DWORD attrs = GetFileAttributesA(pattern.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                std::string dir = pattern;
+                if (!dir.empty() && dir.back() != '\\' && dir.back() != '/') dir.push_back('\\');
+                search = dir + "*.meta";
+        }
+        HANDLE hFind = FindFirstFileA(search.c_str(), &ffd);
+        if (hFind == INVALID_HANDLE_VALUE) {
+                return false;
+        }
+        do {
+                if (strcmp(ffd.cFileName, ".") == 0 || strcmp(ffd.cFileName, "..") == 0) continue;
+                std::string path = search;
+                size_t pos = path.find_last_of("\\/");
+                if (pos != std::string::npos) {
+                        path = path.substr(0, pos + 1) + ffd.cFileName;
+                } else {
+                        path = ffd.cFileName;
+                }
+                out->push_back(path);
+        } while (FindNextFileA(hFind, &ffd) != 0);
+        FindClose(hFind);
+        return !out->empty();
+#else
+        struct stat st;
+        if (stat(pattern.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                std::string dir = pattern;
+                if (!dir.empty() && dir.back() != '/') dir.push_back('/');
+                std::string pat = dir + "*.meta";
+                glob_t g;
+                int r = glob(pat.c_str(), 0, NULL, &g);
+                if (r == 0) {
+                        for (size_t i = 0; i < g.gl_pathc; i++) {
+                                out->push_back(std::string(g.gl_pathv[i]));
+                        }
+                }
+                globfree(&g);
+                return !out->empty();
+        }
+        glob_t g;
+        int r = glob(pattern.c_str(), 0, NULL, &g);
+        if (r != 0) {
+                globfree(&g);
+                return false;
+        }
+        for (size_t i = 0; i < g.gl_pathc; i++) {
+                out->push_back(std::string(g.gl_pathv[i]));
+        }
+        globfree(&g);
+        return !out->empty();
+#endif
+}
+
+static bool load_worker_metadata(const std::string &pattern, std::vector<WorkerMeta> *out) {
+        std::vector<std::string> files;
+        if (!expand_glob_or_dir(pattern, &files)) {
+                fprintf(stderr, "[E] No worker metadata files found for pattern %s\n", pattern.c_str());
+                return false;
+        }
+        for (const auto &f : files) {
+                WorkerMeta meta;
+                if (!parse_worker_meta_file(f, &meta)) {
+                        fprintf(stderr, "[E] Failed to parse worker metadata %s\n", f.c_str());
+                        return false;
+                }
+                out->push_back(meta);
+        }
+        return !out->empty();
+}
+
+static bool ensure_worker_set_complete(const std::vector<WorkerMeta> &metas, uint32_t *out_total) {
+        if (metas.empty()) return false;
+        uint32_t total = metas[0].worker_total;
+        std::set<uint32_t> seen;
+        for (const auto &m : metas) {
+                if (m.worker_total != total) {
+                        fprintf(stderr, "[E] worker_total mismatch across metadata (%u vs %u)\n", m.worker_total, total);
+                        return false;
+                }
+                if (!seen.insert(m.worker_id).second) {
+                        fprintf(stderr, "[E] Duplicate worker id %" PRIu32 " in metadata\n", m.worker_id);
+                        return false;
+                }
+        }
+        for (uint32_t i = 0; i < total; i++) {
+                if (seen.find(i) == seen.end()) {
+                        fprintf(stderr, "[E] Missing metadata for worker %" PRIu32 " (expected 0..%" PRIu32 ")\n", i, total - 1);
+                        return false;
+                }
+        }
+        if (out_total) *out_total = total;
+        return true;
+}
+
+static bool validate_worker_parameters(const std::vector<WorkerMeta> &metas, Int &N_expected, uint64_t M, uint64_t M2, uint64_t M3) {
+        if (metas.empty()) return false;
+        Int expected_copy;
+        expected_copy.Set(&N_expected);
+        for (const auto &m : metas) {
+                Int N_meta;
+                if (!parse_hex_int(m.N_hex, N_meta)) {
+                        fprintf(stderr, "[E] Worker %" PRIu32 " has invalid N in metadata\n", m.worker_id);
+                        return false;
+                }
+                if (!N_meta.IsEqual(&expected_copy)) {
+                        fprintf(stderr, "[E] Worker %" PRIu32 " N mismatch\n", m.worker_id);
+                        return false;
+                }
+                if ((uint64_t)m.kfactor != (uint64_t)KFACTOR) {
+                        fprintf(stderr, "[E] Worker %" PRIu32 " k mismatch (%d vs %d)\n", m.worker_id, m.kfactor, KFACTOR);
+                        return false;
+                }
+                if (m.M != M || m.M2 != M2 || m.M3 != M3) {
+                        fprintf(stderr, "[E] Worker %" PRIu32 " M/M2/M3 mismatch\n", m.worker_id);
+                        return false;
+                }
+                if (m.block_count != (uint64_t)bsgs_ggsb.block_count || m.block_size != (uint64_t)bsgs_ggsb.block_size) {
+                        fprintf(stderr, "[E] Worker %" PRIu32 " block parameters mismatch\n", m.worker_id);
+                        return false;
+                }
+                if (m.mapped_chunks_meta != mapped_chunks) {
+                        fprintf(stderr, "[E] Worker %" PRIu32 " mapped-chunks mismatch (%u vs %u)\n",
+                                m.worker_id, m.mapped_chunks_meta, mapped_chunks);
+                        return false;
+                }
+                if (m.ptable_entries_total != M3) {
+                        fprintf(stderr, "[E] Worker %" PRIu32 " ptable_entries_total mismatch (%" PRIu64 " vs %" PRIu64 ")\n",
+                                m.worker_id, m.ptable_entries_total, M3);
+                        return false;
+                }
+        }
+        return true;
+}
+
+static bool validate_ptable_slices(const std::vector<WorkerMeta> &metas) {
+        if (metas.empty()) return false;
+        std::vector<WorkerMeta> sorted = metas;
+        std::sort(sorted.begin(), sorted.end(), [](const WorkerMeta &a, const WorkerMeta &b){ return a.worker_id < b.worker_id; });
+        uint64_t expect_start = 0;
+        for (const auto &m : sorted) {
+                if (m.ptable_slice_start != expect_start) {
+                        fprintf(stderr, "[E] ptable slices gap at worker %" PRIu32 " (expected start %" PRIu64 ", got %" PRIu64 ")\n",
+                                m.worker_id, expect_start, m.ptable_slice_start);
+                        return false;
+                }
+                expect_start = m.ptable_slice_end;
+        }
+        if (expect_start != sorted.back().ptable_entries_total) {
+                fprintf(stderr, "[E] ptable slices do not cover expected entries (covered %" PRIu64 ", expected %" PRIu64 ")\n",
+                        expect_start, sorted.back().ptable_entries_total);
+                return false;
+        }
+        return true;
+}
+
+static bool load_md5_hex(const std::string &hex, uint8_t out[16]) {
+        if (hex.size() != 32) return false;
+        for (size_t i = 0; i < 16; i++) {
+                char hi = hex[2*i];
+                char lo = hex[2*i+1];
+                auto hexval = [](char c)->int{
+                        if (c >= '0' && c <= '9') return c - '0';
+                        if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+                        if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+                        return -1;
+                };
+                int h = hexval(hi);
+                int l = hexval(lo);
+                if (h < 0 || l < 0) return false;
+                out[i] = (uint8_t)((h << 4) | l);
+        }
+        return true;
+}
+
+static bool or_merge_chunk(uint8_t *dst, const uint8_t *src, uint64_t len) {
+        if (!dst || !src) return false;
+        for (uint64_t i = 0; i < len; i++) {
+                dst[i] |= src[i];
+        }
+        return true;
+}
+
+static bool or_merge_bloom_pair(struct bloom *dst, struct bloom *src) {
+        if (!dst || !src) return false;
+        if (dst->bytes != src->bytes || dst->mapped_chunks != src->mapped_chunks) {
+                fprintf(stderr, "[E] Bloom shard size mismatch while merging (bytes %" PRIu64 " vs %" PRIu64 ", chunks %u vs %u)\n",
+                        dst->bytes, src->bytes, dst->mapped_chunks, src->mapped_chunks);
+                return false;
+        }
+        if (dst->mapped_chunks <= 1) {
+                return or_merge_chunk(dst->bf, src->bf, dst->bytes);
+        }
+        for (uint32_t i = 0; i < dst->mapped_chunks; i++) {
+                uint64_t cbytes = (i == dst->mapped_chunks - 1) ? dst->last_chunk_bytes : dst->chunk_bytes;
+                if (!or_merge_chunk(dst->bf_chunks[i], src->bf_chunks[i], cbytes)) {
+                        return false;
+                }
+        }
+        return true;
+}
+
+static bool merge_bloom_shards_for_layer(uint32_t layer, uint64_t items_expected, const std::vector<WorkerMeta> &metas) {
+        const char *prefix = (layer == 1) ? "bloom" : (layer == 2 ? "bloom2" : "bloom3");
+        printf("[i] Merging bloom layer %u (%" PRIu64 " items)\n", layer, items_expected);
+        for (uint32_t bucket = 0; bucket < 256; bucket++) {
+                std::string dest_path = build_bloom_shard_path(layer, bucket, prefix, 0, 1);
+                struct bloom dest = {0};
+                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
+                bloom_set_readonly(0);
+                bloom_set_populate(FLAGMAPPEDPOPULATE);
+                bloom_set_willneed(FLAGMAPPEDWILLNEED);
+                if (bloom_init_mmap(&dest, items_expected, error, dest_path.c_str(), 1, mapped_chunks) != 0) {
+                        fprintf(stderr, "[E] Unable to open destination bloom shard %s\n", dest_path.c_str());
+                        return false;
+                }
+                // reset to zero to avoid stale bits
+                if (dest.mapped_chunks > 1 && dest.bf_chunks) {
+                        for (uint32_t i = 0; i < dest.mapped_chunks; i++) {
+                                uint64_t cbytes = (i == dest.mapped_chunks - 1) ? dest.last_chunk_bytes : dest.chunk_bytes;
+                                memset(dest.bf_chunks[i], 0, cbytes);
+                        }
+                } else if (dest.bf && dest.bytes) {
+                        memset(dest.bf, 0, dest.bytes);
+                }
+                for (const auto &meta : metas) {
+                        std::string src_path = build_bloom_shard_path(layer, bucket, prefix, meta.worker_id, meta.worker_total);
+                        struct bloom src = {0};
+                        bloom_set_readonly(1);
+                        if (bloom_load_mmap(&src, src_path.c_str(), mapped_chunks) != 0) {
+                                fprintf(stderr, "[E] Unable to load worker %" PRIu32 " shard %s\n", meta.worker_id, src_path.c_str());
+                                bloom_unmap(&dest);
+                                return false;
+                        }
+                        if (!or_merge_bloom_pair(&dest, &src)) {
+                                bloom_unmap(&src);
+                                bloom_unmap(&dest);
+                                return false;
+                        }
+                        bloom_unmap(&src);
+                }
+                bloom_unmap(&dest);
+                if (bucket % 32 == 0) {
+                        printf("[i]   merged bucket %u/255\n", bucket);
+                }
+        }
+        return true;
+}
+
+static bool merge_bloom_layers(const std::vector<WorkerMeta> &metas, uint64_t items1, uint64_t items2, uint64_t items3) {
+        if (!merge_bloom_shards_for_layer(1, items1, metas)) return false;
+        if (!merge_bloom_shards_for_layer(2, items2, metas)) return false;
+        if (!merge_bloom_shards_for_layer(3, items3, metas)) return false;
+        return true;
+}
+
+static bool verify_ptable_md5_if_present(const WorkerMeta &meta) {
+        if (!meta.has_ptable_md5) return true;
+        uint8_t expected[16];
+        if (!load_md5_hex(meta.ptable_md5_hex, expected)) {
+                fprintf(stderr, "[E] Worker %" PRIu32 " invalid MD5 string\n", meta.worker_id);
+                return false;
+        }
+        uint8_t actual[16];
+        if (md5_file(meta.ptable_path.c_str(), actual) != 0) {
+                fprintf(stderr, "[E] Unable to compute MD5 for worker %" PRIu32 " ptable slice %s\n",
+                        meta.worker_id, meta.ptable_path.c_str());
+                return false;
+        }
+        if (memcmp(expected, actual, 16) != 0) {
+                fprintf(stderr, "[E] Worker %" PRIu32 " ptable MD5 mismatch\n", meta.worker_id);
+                return false;
+        }
+        return true;
+}
+
+static bool merge_ptable_slices(const std::vector<WorkerMeta> &metas, const std::string &dest_path, uint64_t total_entries) {
+        if (dest_path.empty()) {
+                fprintf(stderr, "[E] Destination ptable path is required for merge\n");
+                return false;
+        }
+        size_t bytes_total;
+        if (total_entries > (SIZE_MAX / sizeof(struct bsgs_xvalue))) {
+                fprintf(stderr, "[E] ptable too large to map for merge\n");
+                return false;
+        }
+        bytes_total = (size_t)(total_entries * sizeof(struct bsgs_xvalue));
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        HANDLE hFile = CreateFileA(dest_path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) {
+                fprintf(stderr, "[E] Unable to create destination ptable %s\n", dest_path.c_str());
+                return false;
+        }
+        LARGE_INTEGER size;
+        size.QuadPart = (LONGLONG)bytes_total;
+        if (!SetFilePointerEx(hFile, size, NULL, FILE_BEGIN) || !SetEndOfFile(hFile)) {
+                fprintf(stderr, "[E] Unable to resize destination ptable %s\n", dest_path.c_str());
+                CloseHandle(hFile);
+                return false;
+        }
+        HANDLE hMap = CreateFileMappingA(hFile, NULL, PAGE_READWRITE, 0, 0, NULL);
+        if (!hMap) {
+                fprintf(stderr, "[E] Unable to map destination ptable %s\n", dest_path.c_str());
+                CloseHandle(hFile);
+                return false;
+        }
+        struct bsgs_xvalue *dest = (struct bsgs_xvalue*)MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, bytes_total);
+        if (!dest) {
+                fprintf(stderr, "[E] MapViewOfFile failed for ptable %s\n", dest_path.c_str());
+                CloseHandle(hMap);
+                CloseHandle(hFile);
+                return false;
+        }
+#else
+        int fd = open(dest_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+                fprintf(stderr, "[E] Unable to open destination ptable %s: %s\n", dest_path.c_str(), strerror(errno));
+                return false;
+        }
+        if (ftruncate(fd, bytes_total) != 0) {
+                fprintf(stderr, "[E] Unable to size destination ptable %s: %s\n", dest_path.c_str(), strerror(errno));
+                close(fd);
+                return false;
+        }
+        struct bsgs_xvalue *dest = (struct bsgs_xvalue*)mmap(NULL, bytes_total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (dest == MAP_FAILED) {
+                fprintf(stderr, "[E] Unable to map destination ptable %s: %s\n", dest_path.c_str(), strerror(errno));
+                close(fd);
+                return false;
+        }
+#endif
+        memset(dest, 0, bytes_total);
+        printf("[i] Copying ptable slices into %s\n", dest_path.c_str());
+        for (const auto &meta : metas) {
+                struct stat st;
+                if (stat(meta.ptable_path.c_str(), &st) != 0) {
+                        fprintf(stderr, "[E] Missing ptable slice %s for worker %" PRIu32 "\n",
+                                meta.ptable_path.c_str(), meta.worker_id);
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                        UnmapViewOfFile(dest);
+                        CloseHandle(hMap);
+                        CloseHandle(hFile);
+#else
+                        munmap(dest, bytes_total);
+                        close(fd);
+#endif
+                        return false;
+                }
+                uint64_t expected_bytes = meta.ptable_slice_len * (uint64_t)sizeof(struct bsgs_xvalue);
+                if ((uint64_t)st.st_size < expected_bytes) {
+                        fprintf(stderr, "[E] ptable slice %s is smaller than expected (%" PRIu64 " vs %" PRIu64 ")\n",
+                                meta.ptable_path.c_str(), (uint64_t)st.st_size, expected_bytes);
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                        UnmapViewOfFile(dest);
+                        CloseHandle(hMap);
+                        CloseHandle(hFile);
+#else
+                        munmap(dest, bytes_total);
+                        close(fd);
+#endif
+                        return false;
+                }
+                if (!verify_ptable_md5_if_present(meta)) {
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                        UnmapViewOfFile(dest);
+                        CloseHandle(hMap);
+                        CloseHandle(hFile);
+#else
+                        munmap(dest, bytes_total);
+                        close(fd);
+#endif
+                        return false;
+                }
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                HANDLE hSrc = CreateFileA(meta.ptable_path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hSrc == INVALID_HANDLE_VALUE) {
+                        fprintf(stderr, "[E] Unable to open ptable slice %s\n", meta.ptable_path.c_str());
+                        UnmapViewOfFile(dest);
+                        CloseHandle(hMap);
+                        CloseHandle(hFile);
+                        return false;
+                }
+                HANDLE hSrcMap = CreateFileMappingA(hSrc, NULL, PAGE_READONLY, 0, 0, NULL);
+                if (!hSrcMap) {
+                        fprintf(stderr, "[E] Unable to map ptable slice %s\n", meta.ptable_path.c_str());
+                        CloseHandle(hSrc);
+                        UnmapViewOfFile(dest);
+                        CloseHandle(hMap);
+                        CloseHandle(hFile);
+                        return false;
+                }
+                struct bsgs_xvalue *src = (struct bsgs_xvalue*)MapViewOfFile(hSrcMap, FILE_MAP_READ, 0, 0, expected_bytes);
+                if (!src) {
+                        fprintf(stderr, "[E] MapViewOfFile failed for slice %s\n", meta.ptable_path.c_str());
+                        CloseHandle(hSrcMap);
+                        CloseHandle(hSrc);
+                        UnmapViewOfFile(dest);
+                        CloseHandle(hMap);
+                        CloseHandle(hFile);
+                        return false;
+                }
+#else
+                int fd_src = open(meta.ptable_path.c_str(), O_RDONLY);
+                if (fd_src < 0) {
+                        fprintf(stderr, "[E] Unable to open ptable slice %s: %s\n", meta.ptable_path.c_str(), strerror(errno));
+                        munmap(dest, bytes_total);
+                        close(fd);
+                        return false;
+                }
+                struct bsgs_xvalue *src = (struct bsgs_xvalue*)mmap(NULL, expected_bytes, PROT_READ, MAP_SHARED, fd_src, 0);
+                if (src == MAP_FAILED) {
+                        fprintf(stderr, "[E] Unable to map ptable slice %s: %s\n", meta.ptable_path.c_str(), strerror(errno));
+                        close(fd_src);
+                        munmap(dest, bytes_total);
+                        close(fd);
+                        return false;
+                }
+#endif
+                memcpy(dest + meta.ptable_slice_start, src, expected_bytes);
+#if defined(_WIN64) && !defined(__CYGWIN__)
+                UnmapViewOfFile(src);
+                CloseHandle(hSrcMap);
+                CloseHandle(hSrc);
+#else
+                munmap(src, expected_bytes);
+                close(fd_src);
+#endif
+                printf("[i]   copied worker %" PRIu32 " slice (%" PRIu64 " entries)\n", meta.worker_id, meta.ptable_slice_len);
+        }
+        printf("[i] Sorting merged ptable (%" PRIu64 " entries)\n", total_entries);
+        bsgs_sort(dest, (int64_t)total_entries);
+        printf("[i] ptable merge complete\n");
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        UnmapViewOfFile(dest);
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+#else
+        munmap(dest, bytes_total);
+        close(fd);
+#endif
+        return true;
+}
+
+static bool run_bsgs_merge_pipeline(const std::string &pattern, uint64_t items1, uint64_t items2, uint64_t items3) {
+        std::vector<WorkerMeta> metas;
+        if (!load_worker_metadata(pattern, &metas)) return false;
+        uint32_t total_workers = 0;
+        if (!ensure_worker_set_complete(metas, &total_workers)) return false;
+        if (!validate_worker_parameters(metas, BSGS_N, (uint64_t)bsgs_m, (uint64_t)bsgs_m2, (uint64_t)bsgs_m3)) return false;
+        if (!validate_ptable_slices(metas)) return false;
+        if (!merge_bloom_layers(metas, items1, items2, items3)) return false;
+        std::string dest_ptable_path;
+        if (bptable_filename_cli) {
+                dest_ptable_path = resolve_ptable_path_for_worker(bptable_filename_cli, false, 0, 1);
+        } else if (!bptable_resolved_path.empty()) {
+                dest_ptable_path = resolve_ptable_path_for_worker(bptable_resolved_path, false, 0, 1);
+        } else {
+                dest_ptable_path = "bptable_merged.tbl";
+        }
+        if (!merge_ptable_slices(metas, dest_ptable_path, metas[0].ptable_entries_total)) return false;
+        printf("[+] BSGS merge completed. Artifacts: blooms under %s, ptable %s\n",
+               path_dirname(build_bloom_shard_path(1, 0, "bloom", 0, 1)).c_str(),
+               dest_ptable_path.c_str());
+        return true;
+}
 int FLAGSAVEREADFILE = 0;
 int FLAGREADEDFILE1 = 0;
 int FLAGREADEDFILE2 = 0;
@@ -1094,6 +1699,8 @@ int main(int argc, char **argv)	{
                {"worker-id", required_argument, 0, 0},
                {"worker-total", required_argument, 0, 0},
                {"worker-outdir", required_argument, 0, 0},
+               {"bsgs-merge-from", required_argument, 0, 0},
+               {"bsgs-merge-only", no_argument, 0, 0},
                {"bloom-file", required_argument, 0, 0},
                {"load-bloom", no_argument, 0, 0},
                {"loadbloom", no_argument, 0, 0},
@@ -1170,7 +1777,7 @@ int main(int argc, char **argv)	{
                                      fprintf(stderr, "[W] --mapped-willneed expects 0 or 1; defaulting to 0\n");
                                      FLAGMAPPEDWILLNEED = 0;
                              }
-                     } else if (strcmp(long_options[option_index].name, "worker-id") == 0) {
+                      } else if (strcmp(long_options[option_index].name, "worker-id") == 0) {
                              worker_id = (uint32_t)strtoul(optarg, NULL, 10);
                      } else if (strcmp(long_options[option_index].name, "worker-total") == 0) {
                              worker_total = (uint32_t)strtoul(optarg, NULL, 10);
@@ -1180,6 +1787,10 @@ int main(int argc, char **argv)	{
                              }
                      } else if (strcmp(long_options[option_index].name, "worker-outdir") == 0) {
                              worker_outdir = optarg;
+                     } else if (strcmp(long_options[option_index].name, "bsgs-merge-from") == 0) {
+                             bsgs_merge_from = optarg;
+                     } else if (strcmp(long_options[option_index].name, "bsgs-merge-only") == 0) {
+                             FLAGBSGSMERGEONLY = 1;
                      } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
                              mapped_filename = optarg;
                      } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
@@ -1593,6 +2204,10 @@ if(worker_total == 0){
 }
 if(worker_id >= worker_total){
         fprintf(stderr, "[E] worker-id (%u) must be less than worker-total (%u)\n", worker_id, worker_total);
+        exit(EXIT_FAILURE);
+}
+if(FLAGBSGSMERGEONLY && !bsgs_merge_from){
+        fprintf(stderr, "[E] --bsgs-merge-only requires --bsgs-merge-from <glob|dir>\n");
         exit(EXIT_FAILURE);
 }
 
@@ -2195,6 +2810,19 @@ free(hextemp);
                         long double recommended = mapped_error_override ? mapped_error_override : 1e-6L;
                         printf("[plan] Recommended default error=%.1Le (balanced speed vs disk)\n", recommended);
                         exit(EXIT_SUCCESS);
+                }
+
+                if (bsgs_merge_from) {
+                        printf("[i] Starting BSGS merge from %s\n", bsgs_merge_from);
+                        if (!run_bsgs_merge_pipeline(bsgs_merge_from, itemsbloom, itemsbloom2, itemsbloom3)) {
+                                exit(EXIT_FAILURE);
+                        }
+                        FLAGLOADBLOOM = 1;
+                        FLAGLOADPTABLE = 1;
+                        if (FLAGBSGSMERGEONLY) {
+                                printf("[+] Merge-only requested; exiting\n");
+                                exit(EXIT_SUCCESS);
+                        }
                 }
 
                 uint64_t effective_blocks = (bsgs_ggsb.enabled && bsgs_ggsb.block_count)
@@ -7320,6 +7948,8 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
         printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
         printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
 	printf("--load-bloom       Require existing mapped bloom file; do not create a new one\n");
+        printf("--bsgs-merge-from <glob|dir>  Merge worker bloom shards and ptable slices using metadata\n");
+        printf("--bsgs-merge-only  Stop after merge (do not recompute)\n");
         printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
         printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
         printf("--ptable-prealloc {none,fallocate}  Choose sparse default or explicit full preallocation\n");
