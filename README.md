@@ -77,6 +77,9 @@ same parameters plus distinct `--bsgs-worker-id` values (0-indexed) and set
 Use `--skip-bsgs-finalize` on the workers that should only generate their
 assigned slice; run one final pass without that flag after all workers finish
 so the shared bP table is sorted and its checksums are refreshed.
+Workers with `--bsgs-worker-id > 0` refuse to truncate/allocate the shared
+files and require worker 0 (or a dedicated coordinator run) to create the
+mapped bloom shards and ptable beforehand.
 
 ## Free Code
 

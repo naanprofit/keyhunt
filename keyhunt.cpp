@@ -571,6 +571,9 @@ uint64_t bsgs_worker_id = 0;
 uint64_t bsgs_worker_total = 1;
 uint64_t bsgs_worker_start = 0;
 uint64_t bsgs_worker_count = 0;
+static inline bool bsgs_worker_joiner() {
+        return (bsgs_worker_total > 1 && bsgs_worker_id > 0);
+}
 int FLAGLOADBLOOM = 0;
 int FLAGFORCEBLOOMREBUILD = 0;
 int FLAGMAPPEDREADONLY = 0;
@@ -2225,6 +2228,11 @@ free(hextemp);
                printf("[+] Allocating %.2f MB for %" PRIu64  " bP Points\n",(double)(bytes/1048576),bsgs_m3);
 
                int use_mmap = FLAGMAPPED || bptable_filename != NULL || bptable_size_override != 0;
+               bool cooperative_join = bsgs_worker_joiner();
+               if(cooperative_join && !bptable_filename){
+                       fprintf(stderr,"[E] Cooperative workers require --ptable <file> so they can attach without truncation.\n");
+                       exit(EXIT_FAILURE);
+               }
                uint64_t total = get_total_ram();
                if(!use_mmap && total && bytes > total){
                        double need_mb = (double)bytes/1048576.0;
@@ -2273,7 +2281,7 @@ free(hextemp);
                                }
                        }
                        if(fname){
-                               if(FLAGLOADPTABLE){
+                               if(FLAGLOADPTABLE && !cooperative_join){
                                        double t_open = monotonic_ms();
                                        bptable_fd = open(fname,O_RDONLY | O_CLOEXEC);
                                        if(bptable_fd < 0){
@@ -2299,13 +2307,27 @@ free(hextemp);
                                        FLAGREADEDFILE3 = 1;
                                }else{
                                        double t_open = monotonic_ms();
-                                       bptable_fd = open(fname,O_RDWR | O_CREAT | O_CLOEXEC,0600);
+                                       int open_flags = cooperative_join ? O_RDWR | O_CLOEXEC : (O_RDWR | O_CREAT | O_CLOEXEC);
+                                       bptable_fd = open(fname,open_flags,0600);
                                        if(bptable_fd < 0){
-                                               fprintf(stderr,"[E] Cannot create bP table file\n");
+                                               fprintf(stderr,"[E] Cannot %s bP table file\n", cooperative_join ? "open" : "create");
                                                exit(EXIT_FAILURE);
                                        }
                                        io_log_duration("ptable open", t_open);
-                                       if(!have_existing_ptable || st_existing.st_size == 0 || FLAGFORCEPTABLEREBUILD){
+                                       if(cooperative_join){
+                                               if(stat(fname, &st_existing) != 0 || st_existing.st_size == 0){
+                                                       fprintf(stderr,"[E] Cooperative worker %" PRIu64 " requires existing bP table %s; run worker 0 first.\n",
+                                                               (uint64_t)bsgs_worker_id, fname);
+                                                       exit(EXIT_FAILURE);
+                                               }
+                                               if((uint64_t)st_existing.st_size != expected_map_bytes){
+                                                       fprintf(stderr,"[E] Existing bP table size mismatch: expected %" PRIu64 " bytes but found %jd in %s\n",
+                                                               expected_map_bytes, (intmax_t)st_existing.st_size, fname);
+                                                       fprintf(stderr,"    Run worker 0 to allocate with matching parameters.\n");
+                                                       exit(EXIT_FAILURE);
+                                               }
+                                               printf("[+] ptable: ATTACHING existing %s bytes=%" PRIu64 " for cooperative worker\n", fname, map_bytes);
+                                       } else if(!have_existing_ptable || st_existing.st_size == 0 || FLAGFORCEPTABLEREBUILD){
                                                const char *action = (!have_existing_ptable || st_existing.st_size == 0) ? "CREATING" : "REBUILDING";
                                                printf("[+] ptable: %s/TRUNCATING %s bytes=%" PRIu64 "\n", action, fname, map_bytes);
                                                double t_trunc = monotonic_ms();
@@ -8122,10 +8144,12 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
         const char *mapname = map_path.c_str();
         uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
 
-        if(FLAGMAPPED) {
+       if(FLAGMAPPED) {
                 static bool mapped_override_applied = false;
                 bool r = true;
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
+               bool require_existing = bsgs_worker_joiner();
+               bool using_chunks = (mapped_chunks > 1);
 
                /* Explicit load-only mode for mapped bloom filters */
                if(FLAGLOADBLOOM) {
@@ -8172,7 +8196,7 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                                 }
                                 return r;
                         }
-                }
+               }
 
                uint64_t total;
                if(mapped_entries_override && (!mapped_override_applied || items_bloom >= mapped_entries_override)) {
@@ -8187,9 +8211,39 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
                uint64_t need_bytes = bloom_bytes_for_entries_error(total,error);
                warn_if_insufficient_disk_space(mapname,need_bytes);
-               if(bloom_init_mmap(bloom_arg,total,error,mapname,mapped_entries_override != 0,chunks) == 1) {
-                       fprintf(stderr,"[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",mapname,need_bytes,total);
-                       r = false;
+               if(require_existing) {
+                       /* Joining workers must reuse existing shards and refuse to truncate. */
+                       char fname_chk[1024];
+                       bool missing = false;
+                       if(using_chunks) {
+                               for(uint32_t i = 0; i < chunks; i++){
+                                       snprintf(fname_chk,sizeof(fname_chk),"%s.%u",mapname,i);
+                                       struct stat st;
+                                       if(stat(fname_chk,&st) != 0){
+                                               missing = true;
+                                               break;
+                                       }
+                               }
+                       } else {
+                               snprintf(fname_chk,sizeof(fname_chk),"%s",mapname);
+                               struct stat st;
+                               if(stat(fname_chk,&st) != 0){
+                                       missing = true;
+                               }
+                       }
+                       if(missing){
+                               fprintf(stderr,"[E] Cooperative worker %" PRIu64 " requires existing mapped bloom file(s); run worker 0 first.\n",(uint64_t)bsgs_worker_id);
+                               return false;
+                       }
+                       if(bloom_load_mmap(bloom_arg,mapname,chunks) == 1) {
+                               fprintf(stderr,"[E] bloom_load_mmap failed for '%s'\n",mapname);
+                               r = false;
+                       }
+               } else {
+                       if(bloom_init_mmap(bloom_arg,total,error,mapname,mapped_entries_override != 0,chunks) == 1) {
+                               fprintf(stderr,"[E] bloom_init_mmap failed for '%s' (%" PRIu64 " bytes for %" PRIu64 " elements).\n",mapname,need_bytes,total);
+                               r = false;
+                       }
                }
                printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
                return r;
