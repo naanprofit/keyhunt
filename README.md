@@ -781,6 +781,47 @@ Run the BSGS daemon with the same layout:
 ./bsgsd -k 4096 -t 8 -6 -B ggsb --bsgs-block-count 4
 ```
 
+### Worker-sharded BSGS builds, merge, and layout
+
+You can split bloom/ptable generation across multiple workers and merge the results later. Worker 0 writes files directly to the chosen output root; workers `1..N-1` write into `worker1/`, `worker2/`, etc. under that root. Each worker produces `bloom.layer1-000.dat`/`bloom2.layer2-000.dat`/`bloom3.layer3-000.dat`, a ptable slice (for example `bptable.tbl`), and metadata `bptable.tbl.workerX.meta` describing the slice, counts, and checksums.
+
+**Small-range smoke test (two workers, tiny files):**
+
+```bash
+# worker 0
+./keyhunt -m bsgs -b 65 -r 0:100000 -k 16 -S \
+  --worker-total 2 --worker-id 0 \
+  --worker-outdir ./bsgs-shards --mapped-dir ./bsgs-shards --ptable ./bptable.tbl
+
+# worker 1
+./keyhunt -m bsgs -b 65 -r 0:100000 -k 16 -S \
+  --worker-total 2 --worker-id 1 \
+  --worker-outdir ./bsgs-shards --mapped-dir ./bsgs-shards --ptable ./bptable.tbl
+```
+
+Merged canonical files (no worker suffixes) land directly under `./bsgs-shards`:
+
+```bash
+./keyhunt -m bsgs -b 65 -r 0:100000 -k 16 -S \
+  --bsgs-merge-from "./bsgs-shards/worker*/bptable.tbl.worker*.meta" \
+  --bsgs-merge-only \
+  --worker-outdir ./bsgs-shards --mapped-dir ./bsgs-shards --ptable ./bptable.tbl
+```
+
+After merging, run the search normally against the canonical artifacts (for example: `./bsgs-shards/bloom.layer1-000.dat`, `./bsgs-shards/bloom2.layer2-000.dat`, `./bsgs-shards/bloom3.layer3-000.dat`, and `./bsgs-shards/bptable.tbl`):
+
+```bash
+./keyhunt -m bsgs -b 65 -r 0:100000 -k 16 -S -R \
+  --load-bloom --load-ptable \
+  --mapped-dir ./bsgs-shards --ptable ./bptable.tbl
+```
+
+**Safeguards during sharded runs and merges:**
+
+- Worker IDs are validated against `--worker-total`, and the merge refuses to proceed if metadata for any worker is missing or duplicated.
+- Metadata checks enforce consistent `N`, `k`, block counts/sizes, mapped chunk counts, and bloom/table entry totals before merging.
+- Ptable slices must exactly cover the expected range; gaps or overlaps abort the merge. Bloom shards and slices also carry checksums (SHA-256 per layer plus MD5 for ptable slices) that are verified unless you explicitly skip them with `-6`.
+
 **Quick sanity check without huge files**: use a tiny range and small `-k` to confirm the pipeline before scaling up, e.g.
 
 ```bash
