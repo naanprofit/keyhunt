@@ -1,6 +1,7 @@
 #ifndef CUSTOMUTILH
 #define CUSTOMUTILH
 
+#include <stddef.h>
 #include <stdint.h>
 typedef struct str_list	{
 	int n;
@@ -37,6 +38,7 @@ void print_nk_table(void);
 uint64_t get_total_ram(void);
 
 int md5_file(const char *path, uint8_t digest[16]);
+int md5_buffer(const uint8_t *data, size_t len, uint8_t digest[16]);
 void md5_to_hex(const uint8_t digest[16], char hex[33]);
 
 #endif // CUSTOMUTILH
