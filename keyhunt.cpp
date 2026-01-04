@@ -563,6 +563,8 @@ int FLAGMAPPED = 0;
 int FLAGCREATEMAPPED = 0;
 const char *mapped_filename = NULL;
 const char *mapped_dir = NULL;
+const char *worker_outdir = NULL;
+uint32_t worker_id = 0;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
 long double mapped_bpe_override = 0;
@@ -652,6 +654,43 @@ static bool ensure_directory_exists(const std::string &dir, bool readonly) {
         return true;
 }
 
+static std::string worker_directory_for_path(const std::string &base_dir) {
+        std::string dir = (worker_outdir && *worker_outdir) ? worker_outdir : base_dir;
+        if (dir.empty()) {
+                dir = ".";
+        }
+        if (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\')) {
+                dir.pop_back();
+        }
+        if (worker_id > 0) {
+                char worker_label[32];
+                snprintf(worker_label, sizeof(worker_label), "worker%u", worker_id);
+                std::string last = path_basename(dir);
+                if (last != worker_label) {
+                        if (!dir.empty() && dir.back() != '/') {
+                                dir.push_back('/');
+                        }
+                        dir += worker_label;
+                }
+        }
+        return dir;
+}
+
+static std::string resolve_bloom_path_for_worker(const std::string &base_path, bool readonly) {
+        if (base_path.empty()) {
+                return std::string();
+        }
+        std::string fname = path_basename(base_path);
+        std::string dir = worker_directory_for_path(path_dirname(base_path));
+        if (!ensure_directory_exists(dir, readonly)) {
+                return std::string();
+        }
+        if (!dir.empty() && dir.back() != '/') {
+                dir.push_back('/');
+        }
+        return dir + fname;
+}
+
 static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix) {
         std::string mf = mapped_filename ? mapped_filename : "";
         bool ends_with_sep = (!mf.empty() && (mf.back() == '/' || mf.back() == '\\'));
@@ -694,17 +733,19 @@ static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const
                 shard_name = std::string(fallback_prefix) + "." + label + ".dat";
         }
 
-        bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
-        if (!ensure_directory_exists(dir, readonly)) {
-                exit(EXIT_FAILURE);
-        }
-
         std::string fullpath = dir;
         if (!fullpath.empty() && fullpath.back() != '/') {
                 fullpath.push_back('/');
         }
         fullpath += shard_name;
-        return fullpath;
+
+        bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
+        std::string routed = resolve_bloom_path_for_worker(fullpath, readonly);
+        if (routed.empty()) {
+                fprintf(stderr, "[E] Unable to prepare bloom shard path for %s\n", fullpath.c_str());
+                exit(EXIT_FAILURE);
+        }
+        return routed;
 }
 
 int FLAGSAVEREADFILE = 0;
@@ -924,6 +965,8 @@ int main(int argc, char **argv)	{
                {"mapped-plan", no_argument, 0, 0},
                {"mapped-populate", required_argument, 0, 0},
                {"mapped-willneed", required_argument, 0, 0},
+               {"worker-id", required_argument, 0, 0},
+               {"worker-outdir", required_argument, 0, 0},
                {"bloom-file", required_argument, 0, 0},
                {"load-bloom", no_argument, 0, 0},
                {"loadbloom", no_argument, 0, 0},
@@ -1000,11 +1043,15 @@ int main(int argc, char **argv)	{
                                      fprintf(stderr, "[W] --mapped-willneed expects 0 or 1; defaulting to 0\n");
                                      FLAGMAPPEDWILLNEED = 0;
                              }
-                      } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
-                              mapped_filename = optarg;
-                      } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
-                              FLAGLOADBLOOM = 1;
-                      } else if (strcmp(long_options[option_index].name, "loadbloom") == 0) {
+                     } else if (strcmp(long_options[option_index].name, "worker-id") == 0) {
+                             worker_id = (uint32_t)strtoul(optarg, NULL, 10);
+                     } else if (strcmp(long_options[option_index].name, "worker-outdir") == 0) {
+                             worker_outdir = optarg;
+                     } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
+                             mapped_filename = optarg;
+                     } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
+                             FLAGLOADBLOOM = 1;
+                     } else if (strcmp(long_options[option_index].name, "loadbloom") == 0) {
                               FLAGLOADBLOOM = 1;
                       } else if (strcmp(long_options[option_index].name, "ptable") == 0) {
                               bptable_filename = optarg;
@@ -2379,7 +2426,7 @@ free(hextemp);
                        }
                }
 
-		if(FLAGSAVEREADFILE && !FLAGMAPPED)	{
+		if(worker_id == 0 && FLAGSAVEREADFILE && !FLAGMAPPED)	{
 			/*Reading file for 1st bloom filter */
 
 			snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_4_%" PRIu64 ".blm",bsgs_m);
@@ -2900,7 +2947,7 @@ free(hextemp);
 			printf("Done!\n");
 			fflush(stdout);
 		}
-		if(FLAGSAVEREADFILE || FLAGUPDATEFILE1 )	{
+		if(worker_id == 0 && (FLAGSAVEREADFILE || FLAGUPDATEFILE1))	{
 			if(!FLAGREADEDFILE1 || FLAGUPDATEFILE1)	{
 				snprintf(buffer_bloom_file,1024,"keyhunt_bsgs_4_%" PRIu64 ".blm",bsgs_m);
 				
@@ -7041,6 +7088,8 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
         printf("--mapped-plan     Print mapped bloom sizing recommendations and exit\n");
         printf("--mapped-populate {0,1}  Request MAP_POPULATE when memory-mapping blooms (default 0)\n");
         printf("--mapped-willneed {0,1}  Request MADV_WILLNEED for mapped blooms/ptables (default 0)\n");
+        printf("--worker-id n     Worker index for sharded bloom outputs (default 0)\n");
+        printf("--worker-outdir dir  Base directory for worker-local bloom files\n");
         printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
         printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
         printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
@@ -8018,6 +8067,7 @@ bool initBloomFilter(struct bloom *bloom_arg,uint64_t items_bloom)      {
 
 bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const char *fname) {
         std::string map_path = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
+        bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
         if (!map_path.empty() && map_path[0] != '/' && map_path.find(":/") == std::string::npos) {
                 const char *dir_hint = NULL;
                 if (mapped_dir && *mapped_dir) {
@@ -8029,15 +8079,12 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                         map_path = std::string(dir_hint) + "/" + map_path;
                 }
         }
-        std::string parent_dir = path_dirname(map_path);
-        if (!parent_dir.empty()) {
-                bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
-                if (!ensure_directory_exists(parent_dir, readonly)) {
-                        return false;
-                }
+        map_path = resolve_bloom_path_for_worker(map_path, readonly);
+        if (map_path.empty()) {
+                return false;
         }
 
-        bloom_set_readonly(FLAGLOADBLOOM || FLAGMAPPEDREADONLY);
+        bloom_set_readonly(readonly);
         bloom_set_populate(FLAGMAPPEDPOPULATE);
         bloom_set_willneed(FLAGMAPPEDWILLNEED);
 
