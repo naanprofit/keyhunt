@@ -567,12 +567,17 @@ uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
 long double mapped_bpe_override = 0;
 uint32_t mapped_chunks = 1;
+uint64_t bsgs_worker_id = 0;
+uint64_t bsgs_worker_total = 1;
+uint64_t bsgs_worker_start = 0;
+uint64_t bsgs_worker_count = 0;
 int FLAGLOADBLOOM = 0;
 int FLAGFORCEBLOOMREBUILD = 0;
 int FLAGMAPPEDREADONLY = 0;
 int FLAGMAPPEDPLAN = 0;
 int FLAGMAPPEDPOPULATE = 0;
 int FLAGMAPPEDWILLNEED = 0;
+int FLAGSKIPBGSFINALIZE = 0;
 int FLAGIOVERBOSE = 0;
 
 enum PtablePreallocPolicy {
@@ -924,6 +929,9 @@ int main(int argc, char **argv)	{
                {"mapped-plan", no_argument, 0, 0},
                {"mapped-populate", required_argument, 0, 0},
                {"mapped-willneed", required_argument, 0, 0},
+               {"bsgs-worker-id", required_argument, 0, 0},
+               {"bsgs-worker-total", required_argument, 0, 0},
+               {"skip-bsgs-finalize", no_argument, 0, 0},
                {"bloom-file", required_argument, 0, 0},
                {"load-bloom", no_argument, 0, 0},
                {"loadbloom", no_argument, 0, 0},
@@ -1000,9 +1008,19 @@ int main(int argc, char **argv)	{
                                      fprintf(stderr, "[W] --mapped-willneed expects 0 or 1; defaulting to 0\n");
                                      FLAGMAPPEDWILLNEED = 0;
                              }
-                      } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
-                              mapped_filename = optarg;
-                      } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
+                     } else if (strcmp(long_options[option_index].name, "bsgs-worker-id") == 0) {
+                             bsgs_worker_id = strtoull(optarg, NULL, 10);
+                     } else if (strcmp(long_options[option_index].name, "bsgs-worker-total") == 0) {
+                             bsgs_worker_total = strtoull(optarg, NULL, 10);
+                             if(bsgs_worker_total == 0){
+                                     fprintf(stderr, "[W] --bsgs-worker-total must be >= 1; forcing 1.\n");
+                                     bsgs_worker_total = 1;
+                             }
+                     } else if (strcmp(long_options[option_index].name, "skip-bsgs-finalize") == 0) {
+                             FLAGSKIPBGSFINALIZE = 1;
+                     } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
+                             mapped_filename = optarg;
+                     } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
                               FLAGLOADBLOOM = 1;
                       } else if (strcmp(long_options[option_index].name, "loadbloom") == 0) {
                               FLAGLOADBLOOM = 1;
@@ -1928,6 +1946,43 @@ free(hextemp);
 		else	{
 			itemsbloom3 = 1000;
 		}
+
+                if (bsgs_worker_total == 0) {
+                        fprintf(stderr, "[E] --bsgs-worker-total must be at least 1\n");
+                        exit(EXIT_FAILURE);
+                }
+                if (bsgs_worker_id >= bsgs_worker_total) {
+                        fprintf(stderr, "[E] --bsgs-worker-id %" PRIu64 " must be smaller than --bsgs-worker-total %" PRIu64 "\n",
+                                (uint64_t)bsgs_worker_id, (uint64_t)bsgs_worker_total);
+                        exit(EXIT_FAILURE);
+                }
+                uint64_t worker_end_main = bsgs_worker_total > 1
+                        ? (bsgs_m * (bsgs_worker_id + 1)) / bsgs_worker_total
+                        : bsgs_m;
+                bsgs_worker_start = bsgs_worker_total > 1
+                        ? (bsgs_m * bsgs_worker_id) / bsgs_worker_total
+                        : 0;
+                bsgs_worker_count = worker_end_main - bsgs_worker_start;
+                if (bsgs_worker_count == 0) {
+                        fprintf(stderr, "[E] Worker %" PRIu64 " has no assigned baby steps; adjust --bsgs-worker-total.\n",
+                                (uint64_t)bsgs_worker_id);
+                        exit(EXIT_FAILURE);
+                }
+                if (bsgs_worker_total > 1) {
+                        double pct = ((double)bsgs_worker_count / (double)bsgs_m) * 100.0;
+                        printf("[i] Distributed worker %" PRIu64 "/%" PRIu64 " covering [%" PRIu64 ", %" PRIu64 ") (~%.2f%% of bP space)\n",
+                               (uint64_t)bsgs_worker_id,
+                               (uint64_t)(bsgs_worker_total - 1),
+                               (uint64_t)bsgs_worker_start,
+                               (uint64_t)(bsgs_worker_start + bsgs_worker_count),
+                               pct);
+                        if (!FLAGMAPPED || !bptable_filename) {
+                                printf("[i] Tip: place --mapped blooms and --ptable on shared storage so workers can collaborate.\n");
+                        }
+                } else {
+                        bsgs_worker_start = 0;
+                        bsgs_worker_count = bsgs_m;
+                }
 		
                 if (mapped_chunks == 0) {
                         mapped_chunks = 1;
@@ -2647,18 +2702,19 @@ free(hextemp);
 				FINISHED_THREADS_BP = 0;
 				FINISHED_ITEMS = 0;
 				salir = 0;
-				BASE = 0;
+				BASE = bsgs_worker_start;
 				THREADCOUNTER = 0;
-				if(THREADBPWORKLOAD >= bsgs_m2)	{
-					THREADBPWORKLOAD = bsgs_m2;
+				uint64_t worker_stop = bsgs_worker_start + bsgs_worker_count;
+				if(THREADBPWORKLOAD >= bsgs_worker_count)	{
+					THREADBPWORKLOAD = bsgs_worker_count;
 				}
-				THREADCYCLES = bsgs_m2 / THREADBPWORKLOAD;
-				PERTHREAD_R = bsgs_m2 % THREADBPWORKLOAD;
+				THREADCYCLES = bsgs_worker_count / THREADBPWORKLOAD;
+				PERTHREAD_R = bsgs_worker_count % THREADBPWORKLOAD;
 				if(PERTHREAD_R != 0)	{
 					THREADCYCLES++;
 				}
 				
-                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
+                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_worker_count,(int) (((double)FINISHED_ITEMS/(double)bsgs_worker_count)*100));
 				fflush(stdout);
 				
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -2695,11 +2751,17 @@ free(hextemp);
 							bPload_temp_ptr[j].finished = 0;
 							if( THREADCOUNTER < THREADCYCLES-1)	{
 								bPload_temp_ptr[j].to = BASE + THREADBPWORKLOAD;
-								bPload_temp_ptr[j].workload = THREADBPWORKLOAD;
+								if(bPload_temp_ptr[j].to > worker_stop){
+									bPload_temp_ptr[j].to = worker_stop;
+								}
+								bPload_temp_ptr[j].workload = bPload_temp_ptr[j].to - BASE;
 							}
 							else	{
 								bPload_temp_ptr[j].to = BASE + THREADBPWORKLOAD + PERTHREAD_R;
-								bPload_temp_ptr[j].workload = THREADBPWORKLOAD + PERTHREAD_R;
+								if(bPload_temp_ptr[j].to > worker_stop){
+									bPload_temp_ptr[j].to = worker_stop;
+								}
+								bPload_temp_ptr[j].workload = bPload_temp_ptr[j].to - BASE;
 								salir = 1;
 							}
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -2708,13 +2770,13 @@ free(hextemp);
 							s = pthread_create(&tid[j],NULL,thread_bPload_2blooms,(void*) &bPload_temp_ptr[j]);
 							pthread_detach(tid[j]);
 #endif
-							BASE+=THREADBPWORKLOAD;
+							BASE = bPload_temp_ptr[j].to;
 							THREADCOUNTER++;
 						}
 					}
 
 					if(OLDFINISHED_ITEMS != FINISHED_ITEMS)	{
-                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m2,(int) (((double)FINISHED_ITEMS/(double)bsgs_m2)*100));
+                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_worker_count,(int) (((double)FINISHED_ITEMS/(double)bsgs_worker_count)*100));
 						fflush(stdout);
 						OLDFINISHED_ITEMS = FINISHED_ITEMS;
 					}
@@ -2738,7 +2800,7 @@ free(hextemp);
 						}
 					}
 				}while(FINISHED_THREADS_COUNTER < THREADCYCLES);
-                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : 100%%     \n",bsgs_m2,bsgs_m2);
+                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : 100%%     \n",bsgs_worker_count,bsgs_worker_count);
 				
 				free(tid);
 				free(bPload_mutex);
@@ -2756,20 +2818,20 @@ free(hextemp);
 				FINISHED_THREADS_BP = 0;
 				FINISHED_ITEMS = 0;
 				salir = 0;
-				BASE = 0;
+				BASE = bsgs_worker_start;
 				THREADCOUNTER = 0;
-				if(THREADBPWORKLOAD >= bsgs_m)	{
-					THREADBPWORKLOAD = bsgs_m;
+				if(THREADBPWORKLOAD >= bsgs_worker_count)	{
+					THREADBPWORKLOAD = bsgs_worker_count;
 				}
-				THREADCYCLES = bsgs_m / THREADBPWORKLOAD;
-				PERTHREAD_R = bsgs_m % THREADBPWORKLOAD;
+				THREADCYCLES = bsgs_worker_count / THREADBPWORKLOAD;
+				PERTHREAD_R = bsgs_worker_count % THREADBPWORKLOAD;
 				//if(FLAGDEBUG) printf("[D] THREADCYCLES: %lu\n",THREADCYCLES);
 				if(PERTHREAD_R != 0)	{
 					THREADCYCLES++;
 					//if(FLAGDEBUG) printf("[D] PERTHREAD_R: %lu\n",PERTHREAD_R);
 				}
 				
-                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
+                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_worker_count,(int) (((double)FINISHED_ITEMS/(double)bsgs_worker_count)*100));
 				fflush(stdout);
 				
 #if defined(_WIN64) && !defined(__CYGWIN__)
@@ -2806,13 +2868,20 @@ free(hextemp);
 							bPload_temp_ptr[j].from = BASE;
 							bPload_temp_ptr[j].threadid = j;
 							bPload_temp_ptr[j].finished = 0;
+							uint64_t worker_stop = bsgs_worker_start + bsgs_worker_count;
 							if( THREADCOUNTER < THREADCYCLES-1)	{
 								bPload_temp_ptr[j].to = BASE + THREADBPWORKLOAD;
-								bPload_temp_ptr[j].workload = THREADBPWORKLOAD;
+								if(bPload_temp_ptr[j].to > worker_stop){
+									bPload_temp_ptr[j].to = worker_stop;
+								}
+								bPload_temp_ptr[j].workload = bPload_temp_ptr[j].to - BASE;
 							}
 							else	{
 								bPload_temp_ptr[j].to = BASE + THREADBPWORKLOAD + PERTHREAD_R;
-								bPload_temp_ptr[j].workload = THREADBPWORKLOAD + PERTHREAD_R;
+								if(bPload_temp_ptr[j].to > worker_stop){
+									bPload_temp_ptr[j].to = worker_stop;
+								}
+								bPload_temp_ptr[j].workload = bPload_temp_ptr[j].to - BASE;
 								salir = 1;
 								//if(FLAGDEBUG) printf("[D] Salir OK\n");
 							}
@@ -2823,12 +2892,12 @@ free(hextemp);
 							s = pthread_create(&tid[j],NULL,thread_bPload,(void*) &bPload_temp_ptr[j]);
 							pthread_detach(tid[j]);
 #endif
-							BASE+=THREADBPWORKLOAD;
+							BASE = bPload_temp_ptr[j].to;
 							THREADCOUNTER++;
 						}
 					}
 					if(OLDFINISHED_ITEMS != FINISHED_ITEMS)	{
-                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_m,(int) (((double)FINISHED_ITEMS/(double)bsgs_m)*100));
+                                printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : %i%%\r",FINISHED_ITEMS,bsgs_worker_count,(int) (((double)FINISHED_ITEMS/(double)bsgs_worker_count)*100));
 						fflush(stdout);
 						OLDFINISHED_ITEMS = FINISHED_ITEMS;
 					}
@@ -2853,7 +2922,7 @@ free(hextemp);
 					}
 					
 				}while(FINISHED_THREADS_COUNTER < THREADCYCLES);
-                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : 100%%     \n",bsgs_m,bsgs_m);
+                        printf("\r[+] processing %" PRIu64 "/%" PRIu64 " bP points : 100%%     \n",bsgs_worker_count,bsgs_worker_count);
 				
 				free(tid);
 				free(bPload_mutex);
@@ -2862,6 +2931,12 @@ free(hextemp);
 			}
 		}
 		
+		if(FLAGSKIPBGSFINALIZE) {
+			printf("[i] Distributed worker finished range; skipping bloom/ptable finalization (--skip-bsgs-finalize).\n");
+			fflush(stdout);
+			exit(EXIT_SUCCESS);
+		}
+
 		if(!FLAGREADEDFILE1 || !FLAGREADEDFILE2 || !FLAGREADEDFILE4)	{
 			printf("[+] Making checkums .. ");
 			fflush(stdout);
@@ -7041,6 +7116,9 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
         printf("--mapped-plan     Print mapped bloom sizing recommendations and exit\n");
         printf("--mapped-populate {0,1}  Request MAP_POPULATE when memory-mapping blooms (default 0)\n");
         printf("--mapped-willneed {0,1}  Request MADV_WILLNEED for mapped blooms/ptables (default 0)\n");
+        printf("--bsgs-worker-id i     Worker slot (0-index) when splitting bP build across hosts\n");
+        printf("--bsgs-worker-total n  Total workers cooperating on the same mapped bloom/ptable files\n");
+        printf("--skip-bsgs-finalize   Build assigned worker slice then exit without sorting/checksums\n");
         printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
         printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
         printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
@@ -8279,3 +8357,23 @@ void calcualteindex(int i,Int *key)	{
 		key->Add(&BSGS_M3);
 	}
 }
+struct worker_ptable_header {
+        uint32_t magic;
+        uint32_t version;
+        uint32_t worker_id;
+        uint32_t worker_total;
+        uint64_t total_entries;
+        uint64_t bucket_counts[256];
+};
+
+struct worker_bucket_store {
+#if defined(_WIN64) && !defined(__CYGWIN__)
+        HANDLE mutex;
+#else
+        pthread_mutex_t mutex;
+#endif
+        std::vector<struct bsgs_xvalue> entries;
+        bool active;
+
+        worker_bucket_store() : active(false) {}
+};
