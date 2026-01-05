@@ -623,6 +623,7 @@ uint64_t ptable_slice_start = 0;
 uint64_t ptable_slice_len = 0;
 uint64_t ptable_slice_end = 0;
 int FLAGBSGSMERGEONLY = 0;
+int FLAGBSGSBUILDONLY = 0;
 
 static std::string path_dirname(const std::string &input) {
         size_t pos = input.find_last_of("/\\");
@@ -1702,6 +1703,7 @@ int main(int argc, char **argv)	{
                {"worker-outdir", required_argument, 0, 0},
                {"bsgs-merge-from", required_argument, 0, 0},
                {"bsgs-merge-only", no_argument, 0, 0},
+               {"bsgs-build-only", no_argument, 0, 0},
                {"bloom-file", required_argument, 0, 0},
                {"load-bloom", no_argument, 0, 0},
                {"loadbloom", no_argument, 0, 0},
@@ -1792,6 +1794,8 @@ int main(int argc, char **argv)	{
                              bsgs_merge_from = optarg;
                      } else if (strcmp(long_options[option_index].name, "bsgs-merge-only") == 0) {
                              FLAGBSGSMERGEONLY = 1;
+                     } else if (strcmp(long_options[option_index].name, "bsgs-build-only") == 0) {
+                             FLAGBSGSBUILDONLY = 1;
                      } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
                              mapped_filename = optarg;
                      } else if (strcmp(long_options[option_index].name, "load-bloom") == 0) {
@@ -3987,10 +3991,15 @@ free(hextemp);
 				slice_md5_warned = true;
 			}
 		}
-		if(worker_total > 1){
-			std::string ptable_path = bptable_filename ? std::string(bptable_filename) : std::string();
-			write_worker_metadata(ptable_path, slice_md5_ready);
-		}
+                if(worker_total > 1){
+                        std::string ptable_path = bptable_filename ? std::string(bptable_filename) : std::string();
+                        write_worker_metadata(ptable_path, slice_md5_ready);
+                }
+
+                if (FLAGBSGSBUILDONLY) {
+                        printf("[+] BSGS build-only requested; exiting after bloom/ptable generation\n");
+                        return 0;
+                }
 
 		bsgs_steps_total.store(0);
 		steps = new(std::nothrow) std::atomic<uint64_t>[NTHREADS];
@@ -7951,6 +7960,7 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
 	printf("--load-bloom       Require existing mapped bloom file; do not create a new one\n");
         printf("--bsgs-merge-from <glob|dir>  Merge worker bloom shards and ptable slices using metadata\n");
         printf("--bsgs-merge-only  Stop after merge (do not recompute)\n");
+        printf("--bsgs-build-only  Stop after bloom/ptable build (do not start search)\n");
         printf("--ptable=<file> or --ptable <file>  Use a memory-mapped file for the bP table\n");
         printf("--ptable-size sz  Preallocate sz bytes for the mapped bP table (supports K/M/G/T)\n");
         printf("--ptable-prealloc {none,fallocate}  Choose sparse default or explicit full preallocation\n");
