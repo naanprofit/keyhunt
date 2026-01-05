@@ -785,6 +785,8 @@ Run the BSGS daemon with the same layout:
 
 You can split bloom/ptable generation across multiple workers and merge the results later. Worker 0 writes files directly to the chosen output root; workers `1..N-1` write into `worker1/`, `worker2/`, etc. under that root. Each worker produces `bloom.layer1-000.dat`/`bloom2.layer2-000.dat`/`bloom3.layer3-000.dat`, a ptable slice (for example `bptable.tbl`), and metadata `bptable.tbl.workerX.meta` describing the slice, counts, and checksums. Use `--bsgs-build-only` to stop each worker after producing these artifacts (no search), `--bsgs-merge-only` to combine worker outputs and exit, and the usual `--load-bloom --load-ptable` flags to search against the merged artifacts in a final run.
 
+To avoid duplicating bloom shard creation, let worker 0 build the blooms once, then run the remaining workers with `--worker-reuse-bloom --load-bloom`. Non-zero workers will reuse the worker 0 bloom shards in read-only mode and only generate their ptable slice and metadata.
+
 **Small-range smoke test (two workers, tiny files):**
 
 ```bash
@@ -798,7 +800,7 @@ You can split bloom/ptable generation across multiple workers and merge the resu
 ./keyhunt -m bsgs -b 65 -r 0:100000 -k 16 -S \
   --worker-total 2 --worker-id 1 \
   --worker-outdir ./bsgs-shards --mapped-dir ./bsgs-shards --ptable ./bptable.tbl \
-  --bsgs-build-only
+  --load-bloom --worker-reuse-bloom --bsgs-build-only
 ```
 
 Merged canonical files (no worker suffixes) land directly under `./bsgs-shards`:
