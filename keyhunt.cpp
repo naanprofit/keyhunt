@@ -1297,6 +1297,17 @@ static bool merge_bloom_shards_for_layer(uint32_t layer, uint64_t items_expected
                                                 loaded = true;
                                         }
                                 }
+                                if (!loaded && !meta.meta_dir.empty()) {
+                                        std::string alt_path = meta.meta_dir;
+                                        if (!alt_path.empty() && alt_path.back() != '/' && alt_path.back() != '\\') {
+                                                alt_path.push_back('/');
+                                        }
+                                        alt_path += path_basename(src_path);
+                                        if (alt_path != src_path && bloom_load_mmap(&src, alt_path.c_str(), mapped_chunks) == 0) {
+                                                src_path = alt_path;
+                                                loaded = true;
+                                        }
+                                }
                                 if (!loaded) {
                                         fprintf(stderr, "[E] Unable to load worker %" PRIu32 " shard %s\n", meta.worker_id, src_path.c_str());
                                         bloom_unmap(&dest);

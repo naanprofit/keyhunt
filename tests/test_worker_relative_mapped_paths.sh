@@ -63,6 +63,26 @@ for wid in $(seq 0 $((workers - 1))); do
   fi
 done
 
+merge_out="$WORKDIR/merged"
+mkdir -p "$merge_out"
+
+timeout 45s "$BIN" "${common_args[@]}" \
+  --worker-total "$workers" \
+  --worker-outdir "$WORKDIR/workers" \
+  --mapped-dir "$WORKDIR/workers" \
+  --bloom-file "$WORKDIR/workers/bloom.dat" \
+  --ptable "$merge_out/ptable.tbl" \
+  --bsgs-merge-from "$WORKDIR/workers/w*/ptable.tbl.worker*.meta" \
+  --bsgs-merge-only \
+  >"$WORKDIR/merge.log" 2>&1
+
+canonical_bloom="$WORKDIR/workers/bloom.dat.layer1-000.dat"
+if [[ ! -f "$canonical_bloom" && -f "${canonical_bloom}.0" ]]; then
+  canonical_bloom="${canonical_bloom}.0"
+fi
+[[ -f "$canonical_bloom" ]]
+[[ -f "$merge_out/ptable.tbl" ]]
+
 popd >/dev/null
 
 echo "[+] worker-relative mapped bloom paths stay in expected directories"
