@@ -35,22 +35,25 @@ ptable_merged="$shards_dir/bptable_merged.tbl"
 
 run_worker() {
   local wid=$1
-  local worker_tmp="$TMPDIR/worker_$wid"
+  local outdir=$2
+  local mapped_dir=$3
+  local ptable_path=$4
+  local worker_tmp="$TMPDIR/worker_${wid}_$(basename "$outdir")"
   mkdir -p "$worker_tmp"
   timeout 90s "$BIN" "${common_args[@]}" \
     --worker-total "$workers" \
     --worker-id "$wid" \
-    --worker-outdir "$shards_dir" \
-    --mapped-dir "$shards_dir" \
-    --ptable "$ptable_base" \
+    --worker-outdir "$outdir" \
+    --mapped-dir "$mapped_dir" \
+    --ptable "$ptable_path" \
     --tmpdir "$worker_tmp" \
     --bsgs-build-only \
     --force-ptable-rebuild \
-    >"$TMPDIR/worker_${wid}.log" 2>&1
+    >"$TMPDIR/worker_${wid}_$(basename "$outdir").log" 2>&1
 }
 
 for wid in $(seq 0 $((workers - 1))); do
-  run_worker "$wid"
+  run_worker "$wid" "$shards_dir" "$shards_dir" "$ptable_base"
 done
 
 for m in "$shards_dir"/worker*/bptable.tbl.worker*.meta; do
@@ -198,3 +201,36 @@ perl -pi -e 's/mapped_chunks=2/mapped_chunks=3/' "$mismatch_meta_dir"/*.meta
 run_negative_merge "$mismatch_meta_dir" "mapped-chunks mismatch" "param_mismatch"
 
 echo "[+] BSGS merge shard tests passed"
+
+# Repeat the merge with worker directories already named w000/w001 to ensure
+# existing worker-style subdirectories are respected instead of forcing workerX.
+wstyle_dir="$TMPDIR/shards_wstyle"
+mkdir -p "$wstyle_dir/w000" "$wstyle_dir/w001"
+ptable_base_w="$wstyle_dir/ptable.tbl"
+ptable_merged_w="$wstyle_dir/ptable_merged.tbl"
+
+for wid in $(seq 0 $((workers - 1))); do
+  run_worker "$wid" "$wstyle_dir" "$wstyle_dir" "$ptable_base_w"
+done
+
+meta_glob_w="$wstyle_dir/w00*/ptable.tbl.worker*.meta"
+
+if ! ls $meta_glob_w >/dev/null 2>&1; then
+  echo "worker metadata missing for w-style layout" >&2
+  exit 1
+fi
+
+timeout 90s "$BIN" "${common_args[@]}" \
+  --worker-total "$workers" \
+  --worker-outdir "$wstyle_dir" \
+  --mapped-dir "$wstyle_dir" \
+  --ptable "$ptable_merged_w" \
+  --bsgs-merge-from "$meta_glob_w" \
+  --bsgs-merge-only \
+  >"$TMPDIR/merge_wstyle.log" 2>&1
+
+[[ -f "$wstyle_dir/bloom.layer1-000.dat.0" && -f "$wstyle_dir/bloom.layer1-000.dat.1" ]]
+[[ -f "$wstyle_dir/bloom2.layer2-000.dat.0" && -f "$wstyle_dir/bloom2.layer2-000.dat.1" ]]
+[[ -f "$wstyle_dir/bloom3.layer3-000.dat.0" && -f "$wstyle_dir/bloom3.layer3-000.dat.1" ]]
+
+echo "[+] BSGS merge shard tests (w-style dirs) passed"

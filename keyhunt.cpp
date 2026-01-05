@@ -677,17 +677,64 @@ static bool ensure_directory_exists(const std::string &dir, bool readonly) {
         return true;
 }
 
+static bool dir_component_matches_worker_id(const std::string &component, uint32_t id) {
+        if (component.empty()) {
+                return false;
+        }
+        char worker_label[32];
+        snprintf(worker_label, sizeof(worker_label), "worker%u", id);
+        if (component == worker_label) {
+                return true;
+        }
+        char padded_label[32];
+        snprintf(padded_label, sizeof(padded_label), "worker%03u", id);
+        if (component == padded_label) {
+                return true;
+        }
+        snprintf(padded_label, sizeof(padded_label), "w%u", id);
+        if (component == padded_label) {
+                return true;
+        }
+        snprintf(padded_label, sizeof(padded_label), "w%03u", id);
+        if (component == padded_label) {
+                return true;
+        }
+        return false;
+}
+
 static std::string worker_directory_for_path(const std::string &base_dir, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max()) {
         uint32_t id = (worker_override == std::numeric_limits<uint32_t>::max()) ? worker_id : worker_override;
         uint32_t total = (total_override == std::numeric_limits<uint32_t>::max()) ? worker_total : total_override;
-        std::string dir = (worker_outdir && *worker_outdir) ? worker_outdir : base_dir;
+        bool base_dir_meaningful = !(base_dir.empty() || base_dir == "." || base_dir == "./");
+        std::string dir = base_dir_meaningful ? base_dir : "";
+        if (!base_dir_meaningful && worker_outdir && *worker_outdir) {
+                dir = worker_outdir;
+        }
         if (dir.empty()) {
                 dir = ".";
         }
         if (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\')) {
                 dir.pop_back();
         }
-        if (id > 0) {
+        bool already_worker_specific = base_dir_meaningful && dir_component_matches_worker_id(path_basename(dir), id);
+        if (!already_worker_specific && (id > 0 || total > 1)) {
+                const char *candidates[] = {"worker%u", "worker%03u", "w%u", "w%03u"};
+                for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
+                        char candidate[32];
+                        snprintf(candidate, sizeof(candidate), candidates[i], id);
+                        std::string probe = dir;
+                        if (!probe.empty() && probe.back() != '/') {
+                                probe.push_back('/');
+                        }
+                        probe += candidate;
+                        struct stat st;
+                        if (stat(probe.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                                return probe;
+                        }
+                }
+                if (id == 0) {
+                        return dir;
+                }
                 char worker_label[32];
                 snprintf(worker_label, sizeof(worker_label), "worker%u", id);
                 std::string last = path_basename(dir);
