@@ -8989,14 +8989,17 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
         std::string map_path = fname ? fname : (mapped_filename ? mapped_filename : "bloom.dat");
         bool readonly = FLAGLOADBLOOM || FLAGMAPPEDREADONLY;
         if (!map_path.empty() && map_path[0] != '/' && map_path.find(":/") == std::string::npos) {
-                const char *dir_hint = NULL;
-                if (mapped_dir && *mapped_dir) {
-                        dir_hint = mapped_dir;
-                } else if (tmpdir_path && *tmpdir_path) {
-                        dir_hint = tmpdir_path;
-                }
-                if (dir_hint && *dir_hint) {
-                        map_path = std::string(dir_hint) + "/" + map_path;
+                bool has_dir_separator = (map_path.find('/') != std::string::npos) || (map_path.find('\\') != std::string::npos);
+                if (!has_dir_separator) {
+                        const char *dir_hint = NULL;
+                        if (mapped_dir && *mapped_dir) {
+                                dir_hint = mapped_dir;
+                        } else if (tmpdir_path && *tmpdir_path) {
+                                dir_hint = tmpdir_path;
+                        }
+                        if (dir_hint && *dir_hint) {
+                                map_path = std::string(dir_hint) + "/" + map_path;
+                        }
                 }
         }
         map_path = resolve_bloom_path_for_worker(map_path, readonly);
