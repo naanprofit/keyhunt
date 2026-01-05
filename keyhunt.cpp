@@ -1219,6 +1219,7 @@ static bool or_merge_bloom_pair(struct bloom *dst, struct bloom *src) {
 static bool merge_bloom_shards_for_layer(uint32_t layer, uint64_t items_expected, const std::vector<WorkerMeta> &metas) {
         const char *prefix = (layer == 1) ? "bloom" : (layer == 2 ? "bloom2" : "bloom3");
         printf("[i] Merging bloom layer %u (%" PRIu64 " items)\n", layer, items_expected);
+        uint64_t bloom_entries = (items_expected <= 10000) ? 10000 : (uint64_t)FLAGBLOOMMULTIPLIER * items_expected;
         for (uint32_t bucket = 0; bucket < 256; bucket++) {
                 std::string dest_path = build_bloom_shard_path(layer, bucket, prefix, 0, 1);
                 struct bloom dest = {0};
@@ -1226,7 +1227,7 @@ static bool merge_bloom_shards_for_layer(uint32_t layer, uint64_t items_expected
                 bloom_set_readonly(0);
                 bloom_set_populate(FLAGMAPPEDPOPULATE);
                 bloom_set_willneed(FLAGMAPPEDWILLNEED);
-                if (bloom_init_mmap(&dest, items_expected, error, dest_path.c_str(), 1, mapped_chunks) != 0) {
+                if (bloom_init_mmap(&dest, bloom_entries, error, dest_path.c_str(), 1, mapped_chunks) != 0) {
                         fprintf(stderr, "[E] Unable to open destination bloom shard %s\n", dest_path.c_str());
                         return false;
                 }
