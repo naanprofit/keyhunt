@@ -579,6 +579,7 @@ const char *mapped_dir = NULL;
 const char *worker_outdir = NULL;
 uint32_t worker_id = 0;
 uint32_t worker_total = 1;
+int FLAGWORKERREUSEBLOOM = 0;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
 long double mapped_bpe_override = 0;
@@ -861,14 +862,70 @@ static void write_worker_metadata(const std::string &ptable_path, bool md5_ready
                 fclose(meta);
                 printf("[i] Worker metadata saved to %s\n", meta_path.c_str());
         }
-        free(n_hex);
-        free(range_start_hex);
-        free(range_end_hex);
+	free(n_hex);
+	free(range_start_hex);
+	free(range_end_hex);
 }
 
 static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max());
+
+static bool load_shared_bloom_layer(uint32_t layer, uint64_t items_expected, struct bloom *blooms, const char *label) {
+	const char *prefix = (layer == 1) ? "bloom" : (layer == 2 ? "bloom2" : "bloom3");
+	uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
+	printf("[i] worker %" PRIu32 " reusing %s shards from worker0 (layer %u, %" PRIu64 " items)\n",
+	       worker_id, label, layer, items_expected);
+	for (uint32_t bucket = 0; bucket < 256; bucket++) {
+		std::string worker_path;
+		if (worker_id > 0) {
+			int saved_load = FLAGLOADBLOOM;
+			FLAGLOADBLOOM = 0;
+			worker_path = build_bloom_shard_path(layer, bucket, prefix);
+			FLAGLOADBLOOM = saved_load;
+		}
+		std::string shard_path = build_bloom_shard_path(layer, bucket, prefix, 0, worker_total);
+		bloom_set_readonly(1);
+		if (bloom_load_mmap(&blooms[bucket], shard_path.c_str(), chunks) != 0) {
+			fprintf(stderr, "[E] Unable to load shared bloom shard %s for reuse\n", shard_path.c_str());
+			return false;
+		}
+		if (worker_id > 0 && !worker_path.empty() && worker_path != shard_path) {
+			if (!ensure_directory_exists(path_dirname(worker_path), false)) {
+				fprintf(stderr, "[E] Unable to prepare worker directory for %s\n", worker_path.c_str());
+				return false;
+			}
+			auto symlink_if_missing = [](const std::string &src, const std::string &dst) {
+				struct stat st;
+				if (lstat(dst.c_str(), &st) == 0) {
+					return true;
+				}
+				if (symlink(src.c_str(), dst.c_str()) != 0) {
+					fprintf(stderr, "[E] Unable to link %s -> %s (%s)\n", dst.c_str(), src.c_str(), strerror(errno));
+					return false;
+				}
+				return true;
+			};
+			if (!symlink_if_missing(shard_path, worker_path)) {
+				return false;
+			}
+			if (chunks > 1) {
+				for (uint32_t c = 0; c < chunks; c++) {
+					char suffix[16];
+					snprintf(suffix, sizeof(suffix), ".%u", c);
+					std::string src_chunk = shard_path + suffix;
+					std::string dst_chunk = worker_path + suffix;
+					if (!symlink_if_missing(src_chunk, dst_chunk)) {
+						return false;
+					}
+				}
+			}
+		}
+	}
+	bloom_set_readonly(0);
+	return true;
+}
+
 static std::string build_bloom_shard_path_internal(uint32_t layer, uint32_t bucket, const char *fallback_prefix, const char *mapped_override, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max()) {
-        const char *mapped_source = mapped_override ? mapped_override : mapped_filename;
+	const char *mapped_source = mapped_override ? mapped_override : mapped_filename;
         std::string mf = mapped_source ? mapped_source : "";
         bool ends_with_sep = (!mf.empty() && (mf.back() == '/' || mf.back() == '\\'));
         std::string mf_dir;
@@ -1957,6 +2014,7 @@ int main(int argc, char **argv)	{
                {"worker-id", required_argument, 0, 0},
                {"worker-total", required_argument, 0, 0},
                {"worker-outdir", required_argument, 0, 0},
+               {"worker-reuse-bloom", no_argument, 0, 0},
                {"bsgs-merge-from", required_argument, 0, 0},
                {"bsgs-merge-only", no_argument, 0, 0},
                {"bsgs-build-only", no_argument, 0, 0},
@@ -2038,19 +2096,21 @@ int main(int argc, char **argv)	{
                              }
                       } else if (strcmp(long_options[option_index].name, "worker-id") == 0) {
                              worker_id = (uint32_t)strtoul(optarg, NULL, 10);
-                     } else if (strcmp(long_options[option_index].name, "worker-total") == 0) {
-                             worker_total = (uint32_t)strtoul(optarg, NULL, 10);
-                             if(worker_total == 0){
-                                     fprintf(stderr, "[W] --worker-total must be at least 1; defaulting to 1\n");
-                                     worker_total = 1;
-                             }
-                     } else if (strcmp(long_options[option_index].name, "worker-outdir") == 0) {
-                             worker_outdir = optarg;
-                     } else if (strcmp(long_options[option_index].name, "bsgs-merge-from") == 0) {
-                             bsgs_merge_from = optarg;
-                     } else if (strcmp(long_options[option_index].name, "bsgs-merge-only") == 0) {
-                             FLAGBSGSMERGEONLY = 1;
-                     } else if (strcmp(long_options[option_index].name, "bsgs-build-only") == 0) {
+			} else if (strcmp(long_options[option_index].name, "worker-total") == 0) {
+				worker_total = (uint32_t)strtoul(optarg, NULL, 10);
+				if(worker_total == 0){
+					fprintf(stderr, "[W] --worker-total must be at least 1; defaulting to 1\n");
+					worker_total = 1;
+			}
+			} else if (strcmp(long_options[option_index].name, "worker-outdir") == 0) {
+				worker_outdir = optarg;
+			} else if (strcmp(long_options[option_index].name, "worker-reuse-bloom") == 0) {
+				FLAGWORKERREUSEBLOOM = 1;
+			} else if (strcmp(long_options[option_index].name, "bsgs-merge-from") == 0) {
+				bsgs_merge_from = optarg;
+			} else if (strcmp(long_options[option_index].name, "bsgs-merge-only") == 0) {
+				FLAGBSGSMERGEONLY = 1;
+			} else if (strcmp(long_options[option_index].name, "bsgs-build-only") == 0) {
                              FLAGBSGSBUILDONLY = 1;
                      } else if (strcmp(long_options[option_index].name, "bloom-file") == 0) {
                              mapped_filename = optarg;
@@ -3101,19 +3161,30 @@ free(hextemp);
                         (effective_blocks > 1) ? "GGSB" : "classic",
                         effective_blocks,
                         block_babies);
-                fprintf(stderr,
-                        "[i] Expected sizes: each bloom layer ~%.2f MB (256 shards), bPtable ~%.2f MB per block (%.2f MB total).\n",
-                        layer_total_mb, ptable_mb, ptable_total_mb);
+	fprintf(stderr,
+		"[i] Expected sizes: each bloom layer ~%.2f MB (256 shards), bPtable ~%.2f MB per block (%.2f MB total).\n",
+		layer_total_mb, ptable_mb, ptable_total_mb);
 
-                std::string bloom_preview = build_bloom_shard_path(1, 0, "bloom");
-                std::string bloom_dir = path_dirname(bloom_preview);
-                printf("[i] Bloom shards will be stored under %s (example: %s)\n", bloom_dir.c_str(), bloom_preview.c_str());
+	bool worker_reuse_bloom = (worker_total > 1 && worker_id > 0 && FLAGWORKERREUSEBLOOM);
+	if(worker_reuse_bloom){
+		FLAGLOADBLOOM = 1;
+	}
 
-                printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m);
-		bloom_bP = (struct bloom*)calloc(256,sizeof(struct bloom));
-		checkpointer((void *)bloom_bP,__FILE__,"calloc","bloom_bP" ,__LINE__ -1 );
-		bloom_bP_checksums = (struct checksumsha256*)calloc(256,sizeof(struct checksumsha256));
-		checkpointer((void *)bloom_bP_checksums,__FILE__,"calloc","bloom_bP_checksums" ,__LINE__ -1 );
+	std::string bloom_preview = worker_reuse_bloom
+		? build_bloom_shard_path(1, 0, "bloom", 0, worker_total)
+		: build_bloom_shard_path(1, 0, "bloom");
+	std::string bloom_dir = path_dirname(bloom_preview);
+	if(worker_reuse_bloom){
+		printf("[i] Bloom shards will be reused from %s (example: %s)\n", bloom_dir.c_str(), bloom_preview.c_str());
+	}else{
+		printf("[i] Bloom shards will be stored under %s (example: %s)\n", bloom_dir.c_str(), bloom_preview.c_str());
+	}
+
+	printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m);
+	bloom_bP = (struct bloom*)calloc(256,sizeof(struct bloom));
+	checkpointer((void *)bloom_bP,__FILE__,"calloc","bloom_bP" ,__LINE__ -1 );
+	bloom_bP_checksums = (struct checksumsha256*)calloc(256,sizeof(struct checksumsha256));
+	checkpointer((void *)bloom_bP_checksums,__FILE__,"calloc","bloom_bP_checksums" ,__LINE__ -1 );
 		
 #if defined(_WIN64) && !defined(__CYGWIN__)
 		bloom_bP_mutex = (HANDLE*) calloc(256,sizeof(HANDLE));
@@ -3124,27 +3195,40 @@ free(hextemp);
 		checkpointer((void *)bloom_bP_mutex,__FILE__,"calloc","bloom_bP_mutex" ,__LINE__ -1 );
 		
 
-		fflush(stdout);
-		bloom_bP_totalbytes = 0;
-		for(i=0; i< 256; i++)	{
+	fflush(stdout);
+	bloom_bP_totalbytes = 0;
+	for(i=0; i< 256; i++)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
-			bloom_bP_mutex[i] = CreateMutex(NULL, FALSE, NULL);
+		bloom_bP_mutex[i] = CreateMutex(NULL, FALSE, NULL);
 #else
-			pthread_mutex_init(&bloom_bP_mutex[i],NULL);
+		pthread_mutex_init(&bloom_bP_mutex[i],NULL);
 #endif
-                        std::string fname = build_bloom_shard_path(1, i, "bloom");
-                        if(!initBloomFilterMapped(&bloom_bP[i],itemsbloom,fname.c_str())){
-                                fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
-                                exit(EXIT_FAILURE);
-                        }
+	}
+	if(worker_reuse_bloom){
+		if(!load_shared_bloom_layer(1, bsgs_m, bloom_bP, "layer1")){
+			exit(EXIT_FAILURE);
+		}
+		for(i=0; i<256; i++){
+			bloom_bP_totalbytes += bloom_bP[i].bytes;
+		}
+		FLAGREADEDFILE1 = 1;
+		printf(": %.2f MB (shared)\n",(float)((float)(uint64_t)bloom_bP_totalbytes/(float)(uint64_t)1048576));
+	} else {
+		for(i=0; i< 256; i++)	{
+	                std::string fname = build_bloom_shard_path(1, i, "bloom");
+	                if(!initBloomFilterMapped(&bloom_bP[i],itemsbloom,fname.c_str())){
+	                        fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
+	                        exit(EXIT_FAILURE);
+	                }
 			bloom_bP_totalbytes += bloom_bP[i].bytes;
 			//if(FLAGDEBUG) bloom_print(&bloom_bP[i]);
 		}
 		printf(": %.2f MB\n",(float)((float)(uint64_t)bloom_bP_totalbytes/(float)(uint64_t)1048576));
+	}
 
 
-		printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m2);
-		
+	printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m2);
+
 #if defined(_WIN64) && !defined(__CYGWIN__)
 		bloom_bPx2nd_mutex = (HANDLE*) calloc(256,sizeof(HANDLE));
 #else
@@ -3154,53 +3238,79 @@ free(hextemp);
 		bloom_bPx2nd = (struct bloom*)calloc(256,sizeof(struct bloom));
 		checkpointer((void *)bloom_bPx2nd,__FILE__,"calloc","bloom_bPx2nd" ,__LINE__ -1 );
 		bloom_bPx2nd_checksums = (struct checksumsha256*) calloc(256,sizeof(struct checksumsha256));
-		checkpointer((void *)bloom_bPx2nd_checksums,__FILE__,"calloc","bloom_bPx2nd_checksums" ,__LINE__ -1 );
-		bloom_bP2_totalbytes = 0;
-		for(i=0; i< 256; i++)	{
+	checkpointer((void *)bloom_bPx2nd_checksums,__FILE__,"calloc","bloom_bPx2nd_checksums" ,__LINE__ -1 );
+	bloom_bP2_totalbytes = 0;
+	for(i=0; i< 256; i++)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
-			bloom_bPx2nd_mutex[i] = CreateMutex(NULL, FALSE, NULL);
+		bloom_bPx2nd_mutex[i] = CreateMutex(NULL, FALSE, NULL);
 #else
-			pthread_mutex_init(&bloom_bPx2nd_mutex[i],NULL);
+		pthread_mutex_init(&bloom_bPx2nd_mutex[i],NULL);
 #endif
-                        std::string fname2 = build_bloom_shard_path(2, i, "bloom2");
-                        if(!initBloomFilterMapped(&bloom_bPx2nd[i],itemsbloom2,fname2.c_str())){
-                                fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
-                                exit(EXIT_FAILURE);
-                        }
+	}
+	if(worker_reuse_bloom){
+		if(!load_shared_bloom_layer(2, bsgs_m2, bloom_bPx2nd, "layer2")){
+			exit(EXIT_FAILURE);
+		}
+		for(i=0; i<256; i++){
+			bloom_bP2_totalbytes += bloom_bPx2nd[i].bytes;
+		}
+		FLAGREADEDFILE2 = 1;
+		printf(": %.2f MB (shared)\n",(float)((float)(uint64_t)bloom_bP2_totalbytes/(float)(uint64_t)1048576));
+	} else {
+		for(i=0; i< 256; i++)	{
+	                std::string fname2 = build_bloom_shard_path(2, i, "bloom2");
+	                if(!initBloomFilterMapped(&bloom_bPx2nd[i],itemsbloom2,fname2.c_str())){
+	                        fprintf(stderr,"[E] error bloom_init _ [%" PRIu64 "]\n",i);
+	                        exit(EXIT_FAILURE);
+	                }
 			bloom_bP2_totalbytes += bloom_bPx2nd[i].bytes;
 			//if(FLAGDEBUG) bloom_print(&bloom_bPx2nd[i]);
 		}
 		printf(": %.2f MB\n",(float)((float)(uint64_t)bloom_bP2_totalbytes/(float)(uint64_t)1048576));
-		
+	}
+
 
 #if defined(_WIN64) && !defined(__CYGWIN__)
-		bloom_bPx3rd_mutex = (HANDLE*) calloc(256,sizeof(HANDLE));
+	bloom_bPx3rd_mutex = (HANDLE*) calloc(256,sizeof(HANDLE));
 #else
 		bloom_bPx3rd_mutex = (pthread_mutex_t*) calloc(256,sizeof(pthread_mutex_t));
 #endif
 		checkpointer((void *)bloom_bPx3rd_mutex,__FILE__,"calloc","bloom_bPx3rd_mutex" ,__LINE__ -1 );
 		bloom_bPx3rd = (struct bloom*)calloc(256,sizeof(struct bloom));
-		checkpointer((void *)bloom_bPx3rd,__FILE__,"calloc","bloom_bPx3rd" ,__LINE__ -1 );
-		bloom_bPx3rd_checksums = (struct checksumsha256*) calloc(256,sizeof(struct checksumsha256));
-		checkpointer((void *)bloom_bPx3rd_checksums,__FILE__,"calloc","bloom_bPx3rd_checksums" ,__LINE__ -1 );
-		
-		printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m3);
-		bloom_bP3_totalbytes = 0;
-		for(i=0; i< 256; i++)	{
+	checkpointer((void *)bloom_bPx3rd,__FILE__,"calloc","bloom_bPx3rd" ,__LINE__ -1 );
+	bloom_bPx3rd_checksums = (struct checksumsha256*) calloc(256,sizeof(struct checksumsha256));
+	checkpointer((void *)bloom_bPx3rd_checksums,__FILE__,"calloc","bloom_bPx3rd_checksums" ,__LINE__ -1 );
+	
+	printf("[+] Bloom filter for %" PRIu64 " elements ",bsgs_m3);
+	bloom_bP3_totalbytes = 0;
+	for(i=0; i< 256; i++)	{
 #if defined(_WIN64) && !defined(__CYGWIN__)
-			bloom_bPx3rd_mutex[i] = CreateMutex(NULL, FALSE, NULL);
+		bloom_bPx3rd_mutex[i] = CreateMutex(NULL, FALSE, NULL);
 #else
-			pthread_mutex_init(&bloom_bPx3rd_mutex[i],NULL);
+		pthread_mutex_init(&bloom_bPx3rd_mutex[i],NULL);
 #endif
-                        std::string fname3 = build_bloom_shard_path(3, i, "bloom3");
-                        if(!initBloomFilterMapped(&bloom_bPx3rd[i],itemsbloom3,fname3.c_str())){
-                                fprintf(stderr,"[E] error bloom_init [%" PRIu64 "]\n",i);
-                                exit(EXIT_FAILURE);
-                        }
+	}
+	if(worker_reuse_bloom){
+		if(!load_shared_bloom_layer(3, bsgs_m3, bloom_bPx3rd, "layer3")){
+			exit(EXIT_FAILURE);
+		}
+		for(i=0; i<256; i++){
+			bloom_bP3_totalbytes += bloom_bPx3rd[i].bytes;
+		}
+		FLAGREADEDFILE4 = 1;
+		printf(": %.2f MB (shared)\n",(float)((float)(uint64_t)bloom_bP3_totalbytes/(float)(uint64_t)1048576));
+	} else {
+		for(i=0; i< 256; i++)	{
+	                std::string fname3 = build_bloom_shard_path(3, i, "bloom3");
+	                if(!initBloomFilterMapped(&bloom_bPx3rd[i],itemsbloom3,fname3.c_str())){
+	                        fprintf(stderr,"[E] error bloom_init [%" PRIu64 "]\n",i);
+	                        exit(EXIT_FAILURE);
+	                }
 			bloom_bP3_totalbytes += bloom_bPx3rd[i].bytes;
 			//if(FLAGDEBUG) bloom_print(&bloom_bPx3rd[i]);
 		}
 		printf(": %.2f MB\n",(float)((float)(uint64_t)bloom_bP3_totalbytes/(float)(uint64_t)1048576));
+	}
 		//if(FLAGDEBUG) printf("[D] bloom_bP3_totalbytes : %" PRIu64 "\n",bloom_bP3_totalbytes);
 
 		if(FLAGLOADBLOOM){
@@ -8224,15 +8334,16 @@ printf("-z value    Bloom size multiplier, only address,rmd160,vanity, xpoint, v
         printf("--mapped-dir dir  Directory for mapped bloom shard files (defaults to --tmpdir or cwd)\n");
         printf("--mapped-error f  Target false-positive rate for mapped blooms (e.g., 1e-6)\n");
         printf("--mapped-bpe f    Target bits-per-entry for mapped blooms (derives error)\n");
-        printf("--mapped-plan     Print mapped bloom sizing recommendations and exit\n");
-        printf("--mapped-populate {0,1}  Request MAP_POPULATE when memory-mapping blooms (default 0)\n");
-        printf("--mapped-willneed {0,1}  Request MADV_WILLNEED for mapped blooms/ptables (default 0)\n");
-        printf("--worker-id n     Worker index for sharded bloom outputs (default 0)\n");
-        printf("--worker-total n  Total workers responsible for bP table slices (default 1)\n");
-        printf("--worker-outdir dir  Base directory for worker-local bloom files\n");
-        printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
-        printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
-        printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
+	printf("--mapped-plan     Print mapped bloom sizing recommendations and exit\n");
+	printf("--mapped-populate {0,1}  Request MAP_POPULATE when memory-mapping blooms (default 0)\n");
+	printf("--mapped-willneed {0,1}  Request MADV_WILLNEED for mapped blooms/ptables (default 0)\n");
+	printf("--worker-id n     Worker index for sharded bloom outputs (default 0)\n");
+	printf("--worker-total n  Total workers responsible for bP table slices (default 1)\n");
+	printf("--worker-outdir dir  Base directory for worker-local bloom files\n");
+	printf("--worker-reuse-bloom  For worker>0, reuse worker0 bloom shards instead of rebuilding them\n");
+	printf("--bloom-bytes sz  Desired on-disk size for mapped bloom filter in bytes\n");
+	printf("--create-mapped[=sz]  Create and zero a mapped bloom filter file then exit\n");
+	printf("--bloom-file file  Explicit path to mapped bloom file (alias of --mapped=file)\n");
 	printf("--load-bloom       Require existing mapped bloom file; do not create a new one\n");
         printf("--bsgs-merge-from <glob|dir>  Merge worker bloom shards and ptable slices using metadata\n");
         printf("--bsgs-merge-only  Stop after merge (do not recompute)\n");
