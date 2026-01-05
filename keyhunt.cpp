@@ -717,7 +717,8 @@ static std::string worker_directory_for_path(const std::string &base_dir, uint32
                 dir.pop_back();
         }
         bool already_worker_specific = base_dir_meaningful && dir_component_matches_worker_id(path_basename(dir), id);
-        if (id > 0 && !already_worker_specific) {
+        bool append_worker_dir = !already_worker_specific && ((total > 1) || (id > 0));
+        if (append_worker_dir) {
                 char worker_label[32];
                 snprintf(worker_label, sizeof(worker_label), "worker%u", id);
                 std::string last = path_basename(dir);
@@ -727,8 +728,6 @@ static std::string worker_directory_for_path(const std::string &base_dir, uint32
                         }
                         dir += worker_label;
                 }
-        } else if (total > 1) {
-                // allow caller to force a stable non-worker path even when total_override > 1
         }
         return dir;
 }
