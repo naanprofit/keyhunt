@@ -3203,6 +3203,13 @@ free(hextemp);
 		printf(": %.2f MB\n",(float)((float)(uint64_t)bloom_bP3_totalbytes/(float)(uint64_t)1048576));
 		//if(FLAGDEBUG) printf("[D] bloom_bP3_totalbytes : %" PRIu64 "\n",bloom_bP3_totalbytes);
 
+		if(FLAGLOADBLOOM){
+			/* All bloom shards were loaded from disk; avoid rebuilding on read-only mappings. */
+			FLAGREADEDFILE1 = 1;
+			FLAGREADEDFILE2 = 1;
+			FLAGREADEDFILE4 = 1;
+		}
+
 
 
 
