@@ -867,8 +867,10 @@ static void write_worker_metadata(const std::string &ptable_path, bool md5_ready
         free(range_end_hex);
 }
 
-static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max()) {
-        std::string mf = mapped_filename ? mapped_filename : "";
+static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max());
+static std::string build_bloom_shard_path_internal(uint32_t layer, uint32_t bucket, const char *fallback_prefix, const char *mapped_override, uint32_t worker_override = std::numeric_limits<uint32_t>::max(), uint32_t total_override = std::numeric_limits<uint32_t>::max()) {
+        const char *mapped_source = mapped_override ? mapped_override : mapped_filename;
+        std::string mf = mapped_source ? mapped_source : "";
         bool ends_with_sep = (!mf.empty() && (mf.back() == '/' || mf.back() == '\\'));
         std::string mf_dir;
         std::string mf_body;
@@ -922,6 +924,15 @@ static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const
                 exit(EXIT_FAILURE);
         }
         return routed;
+}
+
+static std::string build_bloom_shard_path(uint32_t layer, uint32_t bucket, const char *fallback_prefix, uint32_t worker_override, uint32_t total_override) {
+        return build_bloom_shard_path_internal(layer, bucket, fallback_prefix, NULL, worker_override, total_override);
+}
+
+static std::string build_bloom_shard_path_default_prefix(uint32_t layer, uint32_t bucket, const char *fallback_prefix, uint32_t worker_override, uint32_t total_override) {
+        // Force use of the default naming scheme by ignoring any mapped_filename override.
+        return build_bloom_shard_path_internal(layer, bucket, fallback_prefix, "", worker_override, total_override);
 }
 
 struct WorkerMeta {
@@ -1276,9 +1287,21 @@ static bool merge_bloom_shards_for_layer(uint32_t layer, uint64_t items_expected
                         struct bloom src = {0};
                         bloom_set_readonly(1);
                         if (bloom_load_mmap(&src, src_path.c_str(), mapped_chunks) != 0) {
-                                fprintf(stderr, "[E] Unable to load worker %" PRIu32 " shard %s\n", meta.worker_id, src_path.c_str());
-                                bloom_unmap(&dest);
-                                return false;
+                                // If a custom --bloom-file is used for the merged output, workers may still have the default filenames.
+                                // Retry with the default naming scheme to support legacy worker shards.
+                                bool loaded = false;
+                                if (mapped_filename != NULL) {
+                                        std::string fallback_path = build_bloom_shard_path_default_prefix(layer, bucket, prefix, meta.worker_id, meta.worker_total);
+                                        if (fallback_path != src_path && bloom_load_mmap(&src, fallback_path.c_str(), mapped_chunks) == 0) {
+                                                src_path = fallback_path;
+                                                loaded = true;
+                                        }
+                                }
+                                if (!loaded) {
+                                        fprintf(stderr, "[E] Unable to load worker %" PRIu32 " shard %s\n", meta.worker_id, src_path.c_str());
+                                        bloom_unmap(&dest);
+                                        return false;
+                                }
                         }
                         if (!or_merge_bloom_pair(&dest, &src)) {
                                 bloom_unmap(&src);
