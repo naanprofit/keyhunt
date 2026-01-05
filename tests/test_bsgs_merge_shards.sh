@@ -44,6 +44,7 @@ run_worker() {
     --mapped-dir "$shards_dir" \
     --ptable "$ptable_base" \
     --tmpdir "$worker_tmp" \
+    --bsgs-build-only \
     --force-ptable-rebuild \
     >"$TMPDIR/worker_${wid}.log" 2>&1
 }
