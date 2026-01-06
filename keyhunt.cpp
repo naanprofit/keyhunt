@@ -738,11 +738,11 @@ static std::string resolve_bloom_path_for_worker(const std::string &base_path, b
                 return std::string();
         }
         std::string fname = path_basename(base_path);
-        std::string dir = worker_directory_for_path(path_dirname(base_path), worker_override, total_override);
-        if (!ensure_directory_exists(dir, readonly)) {
-                return std::string();
-        }
-        if (!dir.empty() && dir.back() != '/') {
+	std::string dir = worker_directory_for_path(path_dirname(base_path), worker_override, total_override);
+	if (!ensure_directory_exists(dir, readonly)) {
+		return std::string();
+	}
+	if (!dir.empty() && dir.back() != '/') {
                 dir.push_back('/');
         }
         return dir + fname;
@@ -816,20 +816,25 @@ static void write_worker_metadata(const std::string &ptable_path, bool md5_ready
                 md5_to_hex(bptable_md5, md5_hex);
         }
         char *n_hex = BSGS_N.GetBase16();
-        char *range_start_hex = n_range_start.GetBase16();
-        char *range_end_hex = n_range_end.GetBase16();
-        FILE *meta = fopen(meta_path.c_str(), "w");
-        if(!meta){
-                fprintf(stderr,"[W] Unable to write worker metadata to %s\n", meta_path.c_str());
-        } else {
-                fprintf(meta,
-                        "worker_id=%" PRIu32 "\n"
-                        "worker_total=%" PRIu32 "\n"
-                        "ptable_path=%s\n"
-                        "ptable_slice_start=%" PRIu64 "\n"
-                        "ptable_slice_end=%" PRIu64 "\n"
-                        "ptable_slice_len=%" PRIu64 "\n"
-                        "ptable_entries_total=%" PRIu64 "\n"
+	char *range_start_hex = n_range_start.GetBase16();
+	char *range_end_hex = n_range_end.GetBase16();
+	FILE *meta = fopen(meta_path.c_str(), "w");
+	if(!meta){
+		fprintf(stderr,"[W] Unable to write worker metadata to %s\n", meta_path.c_str());
+	} else {
+		uint32_t bloom_source = worker_id;
+		if (worker_total > 1 && worker_id > 0 && FLAGWORKERREUSEBLOOM) {
+			bloom_source = 0;
+		}
+			fprintf(meta,
+				"worker_id=%" PRIu32 "\n"
+				"worker_total=%" PRIu32 "\n"
+				"bloom_source_worker=%" PRIu32 "\n"
+				"ptable_path=%s\n"
+			"ptable_slice_start=%" PRIu64 "\n"
+			"ptable_slice_end=%" PRIu64 "\n"
+			"ptable_slice_len=%" PRIu64 "\n"
+			"ptable_entries_total=%" PRIu64 "\n"
                         "N=0x%s\n"
                         "k=%d\n"
                         "M=%" PRIu64 "\n"
@@ -842,8 +847,9 @@ static void write_worker_metadata(const std::string &ptable_path, bool md5_ready
                         "range_end=0x%s\n"
                         "ptable_md5=%s\n",
                         worker_id,
-                        worker_total,
-                        ptable_path.empty() ? "(memory)" : ptable_path.c_str(),
+	                        worker_total,
+	                        bloom_source,
+	                        ptable_path.empty() ? "(memory)" : ptable_path.c_str(),
                         ptable_slice_start,
                         ptable_slice_end,
                         ptable_slice_len,
@@ -858,10 +864,10 @@ static void write_worker_metadata(const std::string &ptable_path, bool md5_ready
                         mapped_chunks,
                         range_start_hex,
                         range_end_hex,
-                        md5_ready ? md5_hex : "(unavailable)");
-                fclose(meta);
-                printf("[i] Worker metadata saved to %s\n", meta_path.c_str());
-        }
+			md5_ready ? md5_hex : "(unavailable)");
+		fclose(meta);
+		printf("[i] Worker metadata saved to %s\n", meta_path.c_str());
+	}
 	free(n_hex);
 	free(range_start_hex);
 	free(range_end_hex);
@@ -875,49 +881,11 @@ static bool load_shared_bloom_layer(uint32_t layer, uint64_t items_expected, str
 	printf("[i] worker %" PRIu32 " reusing %s shards from worker0 (layer %u, %" PRIu64 " items)\n",
 	       worker_id, label, layer, items_expected);
 	for (uint32_t bucket = 0; bucket < 256; bucket++) {
-		std::string worker_path;
-		if (worker_id > 0) {
-			int saved_load = FLAGLOADBLOOM;
-			FLAGLOADBLOOM = 0;
-			worker_path = build_bloom_shard_path(layer, bucket, prefix);
-			FLAGLOADBLOOM = saved_load;
-		}
 		std::string shard_path = build_bloom_shard_path(layer, bucket, prefix, 0, worker_total);
 		bloom_set_readonly(1);
 		if (bloom_load_mmap(&blooms[bucket], shard_path.c_str(), chunks) != 0) {
 			fprintf(stderr, "[E] Unable to load shared bloom shard %s for reuse\n", shard_path.c_str());
 			return false;
-		}
-		if (worker_id > 0 && !worker_path.empty() && worker_path != shard_path) {
-			if (!ensure_directory_exists(path_dirname(worker_path), false)) {
-				fprintf(stderr, "[E] Unable to prepare worker directory for %s\n", worker_path.c_str());
-				return false;
-			}
-			auto symlink_if_missing = [](const std::string &src, const std::string &dst) {
-				struct stat st;
-				if (lstat(dst.c_str(), &st) == 0) {
-					return true;
-				}
-				if (symlink(src.c_str(), dst.c_str()) != 0) {
-					fprintf(stderr, "[E] Unable to link %s -> %s (%s)\n", dst.c_str(), src.c_str(), strerror(errno));
-					return false;
-				}
-				return true;
-			};
-			if (!symlink_if_missing(shard_path, worker_path)) {
-				return false;
-			}
-			if (chunks > 1) {
-				for (uint32_t c = 0; c < chunks; c++) {
-					char suffix[16];
-					snprintf(suffix, sizeof(suffix), ".%u", c);
-					std::string src_chunk = shard_path + suffix;
-					std::string dst_chunk = worker_path + suffix;
-					if (!symlink_if_missing(src_chunk, dst_chunk)) {
-						return false;
-					}
-				}
-			}
 		}
 	}
 	bloom_set_readonly(0);
@@ -994,6 +962,7 @@ static std::string build_bloom_shard_path_default_prefix(uint32_t layer, uint32_
 struct WorkerMeta {
         uint32_t worker_id = 0;
         uint32_t worker_total = 0;
+        uint32_t bloom_source_worker = 0; /* bloom shards taken from this worker; defaults to worker_id */
         uint64_t ptable_slice_start = 0;
         uint64_t ptable_slice_end = 0;
         uint64_t ptable_slice_len = 0;
@@ -1068,6 +1037,12 @@ static bool parse_worker_meta_file(const std::string &path, WorkerMeta *out) {
         meta.meta_dir = path_dirname(path);
         if (!parse_uint32(kv, "worker_id", &meta.worker_id)) return false;
         if (!parse_uint32(kv, "worker_total", &meta.worker_total)) return false;
+        auto bs_it = kv.find("bloom_source_worker");
+        if (bs_it != kv.end()) {
+                if (!parse_uint32(kv, "bloom_source_worker", &meta.bloom_source_worker)) return false;
+        } else {
+                meta.bloom_source_worker = meta.worker_id;
+        }
         if (!parse_uint64(kv, "ptable_slice_start", &meta.ptable_slice_start)) return false;
         if (!parse_uint64(kv, "ptable_slice_end", &meta.ptable_slice_end)) return false;
         if (!parse_uint64(kv, "ptable_slice_len", &meta.ptable_slice_len)) return false;
@@ -1316,14 +1291,19 @@ static bool or_merge_bloom_pair(struct bloom *dst, struct bloom *src) {
 
 static bool merge_bloom_shards_for_layer(uint32_t layer, uint64_t items_expected, const std::vector<WorkerMeta> &metas) {
         const char *prefix = (layer == 1) ? "bloom" : (layer == 2 ? "bloom2" : "bloom3");
-        printf("[i] Merging bloom layer %u (%" PRIu64 " items)\n", layer, items_expected);
-        auto load_worker_shard = [&](const WorkerMeta &meta, uint32_t bucket, struct bloom *out, std::string *path_out) -> bool {
-                std::string src_path = build_bloom_shard_path(layer, bucket, prefix, meta.worker_id, meta.worker_total);
-                uint32_t chunks = meta.mapped_chunks_meta ? meta.mapped_chunks_meta : mapped_chunks;
-                if (chunks == 0) {
-                        chunks = 1;
-                }
-                bloom_set_readonly(1);
+	printf("[i] Merging bloom layer %u (%" PRIu64 " items)\n", layer, items_expected);
+	auto load_worker_shard = [&](const WorkerMeta &meta, uint32_t bucket, struct bloom *out, std::string *path_out) -> bool {
+		uint32_t source_worker = meta.bloom_source_worker;
+		if (source_worker >= meta.worker_total) {
+			fprintf(stderr, "[E] Invalid bloom source worker %" PRIu32 " for worker %" PRIu32 "\n", source_worker, meta.worker_id);
+			return false;
+		}
+		std::string src_path = build_bloom_shard_path(layer, bucket, prefix, source_worker, meta.worker_total);
+		uint32_t chunks = meta.mapped_chunks_meta ? meta.mapped_chunks_meta : mapped_chunks;
+		if (chunks == 0) {
+			chunks = 1;
+		}
+		bloom_set_readonly(1);
                 if (bloom_load_mmap(out, src_path.c_str(), chunks) != 0) {
                         // If a custom --bloom-file is used for the merged output, workers may still have the default filenames.
                         // Retry with the default naming scheme to support legacy worker shards.
