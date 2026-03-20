@@ -9287,6 +9287,42 @@ bool warn_if_insufficient_ram(uint64_t need_bytes) {
         return true;
 }
 
+/* Correct bloom->hashes after bloom_load_mmap to match the original creation parameters.
+ *
+ * bloom_load_mmap infers the hash count from file size using a coarse power-of-2 table
+ * (entries_hashes_for_bytes).  This gives the WRONG k when the shard was created by
+ * bloom_init_mmap with a high-precision error rate (e.g. 1e-6 → k=20), because the
+ * inferred entry count (from the lookup table) differs from the true entry count and
+ * therefore yields a different k.  The mismatch produces false-positive rates as high
+ * as 50 %, cutting throughput by ~30x.
+ *
+ * Fix: recompute k from the known error rate used at creation time.  If no explicit
+ * --mapped-error was supplied (error_override == 0), use the same 1e-6 default that
+ * bloom_init_mmap would have used.
+ *
+ * When --mapped-size was used (mapped_entries_override != 0), the error and k are
+ * derived from the file-size heuristic; in that case error_override will usually be
+ * 0.5^k (set by the --mapped-size parser) and the fix still applies correctly.
+ */
+static void bloom_fix_hashes_from_error(struct bloom *bloom, long double error_override)
+{
+        if (!bloom || !bloom->ready) {
+                return;
+        }
+        long double error = (error_override > 0.0L && error_override < 1.0L) ? error_override : 0.000001L;
+        long double bpe = -logl(error) / 0.480453013918201L;
+        if (bpe <= 0.0L) {
+                return;
+        }
+        uint8_t correct_k = (uint8_t)ceill(0.693147180559945L * bpe);
+        if (correct_k < 1) correct_k = 1;
+        if (correct_k != bloom->hashes) {
+                bloom->hashes = correct_k;
+                bloom->bpe    = (double)bpe;
+                bloom->error  = error;
+        }
+}
+
 /* Sample up to BLOOM_SAT_SAMPLE_BYTES of a bloom filter's backing store to estimate
  * the fraction of bytes that are 0xFF (all bits set). Returns a value in [0.0, 1.0].
  * A result close to 1.0 means the filter is saturated and functionally useless. */
@@ -9411,6 +9447,7 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                                 fprintf(stderr,"[E] Mapped bloom file '%s' has zero length; regenerate it or remove --load-bloom\n",mapname);
                                 return false;
                         }
+                        bloom_fix_hashes_from_error(bloom_arg, mapped_error_override);
                         printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
                         bloom_warn_if_saturated(bloom_arg, mapname);
                         return true;
@@ -9432,6 +9469,7 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                                         fprintf(stderr,"[E] Existing mapped bloom file '%s' is empty; delete it or rerun without --load-bloom\n",mapname);
                                         r = false;
                                 } else {
+                                        bloom_fix_hashes_from_error(bloom_arg, mapped_error_override);
                                         printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
                                         bloom_warn_if_saturated(bloom_arg, mapname);
                                 }
