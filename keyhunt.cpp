@@ -2054,6 +2054,23 @@ int main(int argc, char **argv)	{
                      } else if (strcmp(long_options[option_index].name, "mapped-error") == 0) {
                              FLAGMAPPED = 1;
                              mapped_error_override = strtold(optarg, NULL);
+                             if (mapped_error_override <= 0.0L || mapped_error_override >= 1.0L) {
+                                     fprintf(stderr, "[E] --mapped-error must be between 0 and 1 exclusive (got %Lg)\n", mapped_error_override);
+                                     exit(EXIT_FAILURE);
+                             }
+                             if (mapped_error_override >= 0.5L) {
+                                     fprintf(stderr, "[E] --mapped-error %Lg (~%.1Lf%%) is too high for a useful bloom filter.\n",
+                                             mapped_error_override, mapped_error_override * 100.0L);
+                                     fprintf(stderr, "    At this rate bits fill immediately; after all entries the filter is all-0xFF.\n");
+                                     fprintf(stderr, "    Use a value like 1e-6 for reliable operation (e.g. --mapped-error 1e-6).\n");
+                                     fprintf(stderr, "    Note: 98e-02 = 0.98 (98%% error). Did you mean 98e-8 = 9.8e-7 instead?\n");
+                                     exit(EXIT_FAILURE);
+                             }
+                             if (mapped_error_override > 0.013L) {
+                                     fprintf(stderr, "[W] --mapped-error %Lg (~%.2Lf%%) is above 1.3%%. The bloom will have high fill ratio.\n",
+                                             mapped_error_override, mapped_error_override * 100.0L);
+                                     fprintf(stderr, "    Consider 1e-4 or smaller for reliable bloom filter operation.\n");
+                             }
                              mapped_sizing_opts++;
                      } else if (strcmp(long_options[option_index].name, "mapped-bpe") == 0) {
                              FLAGMAPPED = 1;
@@ -9270,6 +9287,47 @@ bool warn_if_insufficient_ram(uint64_t need_bytes) {
         return true;
 }
 
+/* Sample up to BLOOM_SAT_SAMPLE_BYTES of a bloom filter's backing store to estimate
+ * the fraction of bytes that are 0xFF (all bits set). Returns a value in [0.0, 1.0].
+ * A result close to 1.0 means the filter is saturated and functionally useless. */
+static double bloom_saturation_ratio(struct bloom *bloom)
+{
+        if (!bloom || !bloom->ready || !bloom->bytes) {
+                return 0.0;
+        }
+#define BLOOM_SAT_SAMPLE_BYTES 65536ULL
+        uint64_t sample = bloom->bytes < BLOOM_SAT_SAMPLE_BYTES ? bloom->bytes : BLOOM_SAT_SAMPLE_BYTES;
+        const uint8_t *data = NULL;
+        if (bloom->mapped_chunks > 1 && bloom->bf_chunks) {
+                data = bloom->bf_chunks[0];
+        } else {
+                data = bloom->bf;
+        }
+        if (!data) {
+                return 0.0;
+        }
+        uint64_t ff_count = 0;
+        for (uint64_t i = 0; i < sample; i++) {
+                if (data[i] == 0xFF) ff_count++;
+        }
+        return (double)ff_count / (double)sample;
+#undef BLOOM_SAT_SAMPLE_BYTES
+}
+
+static void bloom_warn_if_saturated(struct bloom *bloom, const char *label)
+{
+        double sat = bloom_saturation_ratio(bloom);
+        if (sat > 0.999) {
+                fprintf(stderr, "[W] Bloom '%s' appears saturated (%.1f%% of sampled bytes are 0xFF).\n",
+                        label, sat * 100.0);
+                fprintf(stderr, "    This bloom is all-1s and will not filter any lookups (every check returns true).\n");
+                fprintf(stderr, "    Rebuild with a lower --mapped-error (e.g. 1e-6) or reduce -k/-n.\n");
+        } else if (sat > 0.95) {
+                fprintf(stderr, "[W] Bloom '%s': %.1f%% of sampled bytes are 0xFF -- very high saturation.\n",
+                        label, sat * 100.0);
+        }
+}
+
 /*
         I write this as a function because i have the same segment of code in 3 different functions
 */
@@ -9329,7 +9387,6 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
         uint32_t chunks = mapped_chunks ? mapped_chunks : 1;
 
         if(FLAGMAPPED) {
-                static bool mapped_override_applied = false;
                 bool r = true;
                 printf("[+] Bloom filter for %" PRIu64 " elements.\n",items_bloom);
 
@@ -9355,6 +9412,7 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                                 return false;
                         }
                         printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                        bloom_warn_if_saturated(bloom_arg, mapname);
                         return true;
                 }
 
@@ -9375,22 +9433,42 @@ bool initBloomFilterMapped(struct bloom *bloom_arg,uint64_t items_bloom, const c
                                         r = false;
                                 } else {
                                         printf("[+] Loading data to the bloomfilter total: %.2f MB\n",(double)(((double) bloom_arg->bytes)/(double)1048576));
+                                        bloom_warn_if_saturated(bloom_arg, mapname);
                                 }
                                 return r;
                         }
                 }
 
                uint64_t total;
-               if(mapped_entries_override && (!mapped_override_applied || items_bloom >= mapped_entries_override)) {
+               if(mapped_entries_override) {
                        total = mapped_entries_override;
-                       if(!mapped_override_applied) {
-                               mapped_override_applied = true; // apply override only once by default
-                       }
                } else {
                        total = (items_bloom <= 10000) ? 10000 : FLAGBLOOMMULTIPLIER * items_bloom;
                }
 
                long double error = mapped_error_override ? mapped_error_override : 0.000001L;
+
+               /* Warn when the bloom filter will saturate to all-1s after inserting all entries.
+                * fill_ratio = 1 - e^(-k/bpe) where bpe = -ln(error)/ln(2)^2 and k = ceil(bpe*ln(2)).
+                * A fully-saturated filter (all 0xFF) is useless: every lookup returns true. */
+               {
+                       long double bpe = -logl(error) / 0.480453013918201L;
+                       if (bpe > 0.0L) {
+                               uint8_t k_hashes = (uint8_t)ceill(0.693147180559945L * bpe);
+                               if (k_hashes < 1) k_hashes = 1;
+                               long double fill_ratio = 1.0L - expl(-(long double)k_hashes / bpe);
+                               if (fill_ratio > 0.99L) {
+                                       fprintf(stderr, "[W] Bloom shard '%s': expected fill after all entries = %.4Lf%% (%.4Lg bits/entry, k=%u).\n",
+                                               mapname, fill_ratio * 100.0L, bpe, (unsigned)k_hashes);
+                                       fprintf(stderr, "    The filter will be essentially all-0xFF and provide no speedup.\n");
+                                       fprintf(stderr, "    Reduce --mapped-error (try 1e-6) or reduce -k/-n to shrink the baby table.\n");
+                               } else if (fill_ratio > 0.90L) {
+                                       fprintf(stderr, "[W] Bloom shard '%s': expected fill = %.1Lf%% -- filter will have high false-positive rate.\n",
+                                               mapname, fill_ratio * 100.0L);
+                               }
+                       }
+               }
+
                uint64_t need_bytes = bloom_bytes_for_entries_error(total,error);
                warn_if_insufficient_disk_space(mapname,need_bytes);
                if(bloom_init_mmap(bloom_arg,total,error,mapname,mapped_entries_override != 0,chunks) == 1) {
