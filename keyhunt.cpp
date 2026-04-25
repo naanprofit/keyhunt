@@ -29,6 +29,7 @@ email: albertobsd@gmail.com
 #include "bloom/bloom.h"
 #include "sha3/sha3.h"
 #include "util.h"
+#include "gpu_bloom.h"
 
 #include "secp256k1/SECP256k1.h"
 #include "secp256k1/Point.h"
@@ -413,6 +414,16 @@ int64_t bsgs_partition(struct bsgs_xvalue *arr, int64_t n);
 int bsgs_searchbinary(struct bsgs_xvalue *arr,char *data,int64_t array_length,uint64_t *range_start,uint64_t *range_end);
 int bsgs_secondcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey);
 int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey);
+/*
+ * Endomorphism-aware variant: uses an override target Point instead of
+ * OriginalPointsBSGS[k_index]. Used when an angrygiant orbit-lane bloom
+ * hits and we need to refine against the twisted target. recover_lane
+ * (0=identity, 1=lambda, 2=lambda^2) tells the caller how to map the
+ * recovered scalar back to the original k.
+ */
+int bsgs_secondcheck_endo(Int *start_range, uint32_t a, uint32_t k_index,
+                          Point *target_override, int recover_lane,
+                          Int *privatekey);
 void build_bptable_cache(uint64_t entry_count);
 int load_bptable_cache(const char *cache_path, const uint8_t md5[16], uint64_t entry_count);
 int save_bptable_cache(const char *cache_path, const uint8_t md5[16], uint64_t entry_count);
@@ -540,6 +551,11 @@ struct bloom bloom;
 
 std::atomic<uint64_t> *steps = NULL;
 std::atomic<uint64_t> bsgs_steps_total{0};
+/* Live progress counter: scalars actually examined (incremented INSIDE the
+ * inner BSGS loop, once per giant-step iteration). Each tick covers
+ * CPU_GRP_SIZE candidate scalars, so this gives a meaningful keys/s reading
+ * within the first second of a run, not "0 until the whole range completes". */
+std::atomic<uint64_t> bsgs_live_steps{0};
 unsigned int *ends = NULL;
 uint64_t N = 0;
 
@@ -551,6 +567,24 @@ Int OUTPUTSECONDS;
 
 int FLAGSKIPCHECKSUM = 0;
 int FLAGENDOMORPHISM = 0;
+/*
+ * BSGS endomorphism mode, controlled by --bsgs-endo.
+ *   0 = off, 1 = keyhunt-style, 2 = glv12-style
+ * (Default 0; keyhunt-style is the recommended speed mode, glv12 is provided
+ * for head-to-head benchmarking against EQ_KANGAROO's lambda^-1 recovery.)
+ */
+#define BSGS_ENDO_OFF      0
+#define BSGS_ENDO_KEYHUNT  1
+#define BSGS_ENDO_GLV12    2
+int FLAGBSGSENDO = BSGS_ENDO_OFF;
+/*
+ * Diagnostic counters for the 3 angrygiant lanes. Useful to verify the
+ * lane-1/lane-2 probes actually fire end-to-end. Printed in the BSGS
+ * status line when --bsgs-endo is active.
+ */
+std::atomic<uint64_t> bsgs_endo_lane_hits[3]    {{0}, {0}, {0}};   /* L1 bloom hits */
+std::atomic<uint64_t> bsgs_endo_lane_recovers[3]{{0}, {0}, {0}};   /* full-key recoveries */
+std::atomic<uint64_t> bsgs_endo_lane_probes[3]  {{0}, {0}, {0}};   /* total probes / lane */
 
 enum {
         BSGS_MODE_GGSB = 5,
@@ -583,6 +617,11 @@ int FLAGWORKERREUSEBLOOM = 0;
 uint64_t mapped_entries_override = 0;
 long double mapped_error_override = 0;
 long double mapped_bpe_override = 0;
+/* User-supplied total byte budget across all 3 BSGS layers x 256 shards.
+ * When non-zero, takes precedence over mapped_entries_override and is used
+ * to derive a per-shard entries override for EACH layer separately, scaled
+ * by that layer's items_bloom (so L2 gets fewer entries than L1, etc). */
+uint64_t mapped_total_bytes_budget = 0;
 uint32_t mapped_chunks = 1;
 int FLAGLOADBLOOM = 0;
 int FLAGFORCEBLOOMREBUILD = 0;
@@ -591,6 +630,8 @@ int FLAGMAPPEDPLAN = 0;
 int FLAGMAPPEDPOPULATE = 0;
 int FLAGMAPPEDWILLNEED = 0;
 int FLAGIOVERBOSE = 0;
+int FLAGHONESTCOUNTER = 0;
+int FLAGGPUBLOOM = 0;
 
 enum PtablePreallocPolicy {
         PTABLE_PREALLOC_NONE = 0,
@@ -1811,6 +1852,26 @@ BSGS Variables
 std::vector<int> bsgs_found;
 std::vector<Point> OriginalPointsBSGS;
 std::vector<bool> OriginalPointsBSGScompressed;
+/*
+ * Endomorphism-twisted target points, populated when --bsgs-endo!=off:
+ *   OriginalPointsBSGS_endo[0][k] = (lambda^-1) * OriginalPointsBSGS[k]
+ *   OriginalPointsBSGS_endo[1][k] = (lambda^-2) * OriginalPointsBSGS[k]
+ *
+ * When the angrygiant lane-1 bloom (X = beta * giant.x) hits, the
+ * matched baby point corresponds to scalar j of (lambda * target),
+ * so we recover by running bsgs_secondcheck against the lambda^-1
+ * target. Same idea for lane-2 with lambda^-2.
+ *
+ * Recovery scalar map:
+ *   lane 0 hit -> k = recovered                              (identity)
+ *   lane 1 hit -> k = recovered * lambda  mod N              (lambda orbit)
+ *   lane 2 hit -> k = recovered * lambda^2 mod N             (lambda^2 orbit)
+ *
+ * Negation orbit shares X with the un-negated source, so a "lane L hit"
+ * actually recovers TWO candidates (k and -k via negation). The
+ * verification step (bsgs_secondcheck) tries both.
+ */
+std::vector<Point> OriginalPointsBSGS_endo[2];
 
 uint64_t bytes;
 char checksum[32],checksum_backup[32];
@@ -2015,6 +2076,17 @@ int main(int argc, char **argv)	{
                {"bsgs-block-count", required_argument, 0, 0},
                {"bsgs-block-size", required_argument, 0, 0},
                {"rmd-batch-size", required_argument, 0, 0},
+               {"honest-counter", no_argument, 0, 0},
+               {"gpu-bloom", no_argument, 0, 0},
+               /*
+                * --bsgs-endo=off|keyhunt|glv12
+                *   off     : no orbit probes, counter stays honest (default)
+                *   keyhunt : 6-orbit probes {P,-P,bP,-bP,b2P,-b2P} via shared
+                *             ModInv batch (mirrors hash-search endomorphism)
+                *   glv12   : same 6 orbits + lambda^-1 recovery (functionally
+                *             equivalent on secp256k1; benched head-to-head)
+                */
+               {"bsgs-endo", required_argument, 0, 0},
                {0, 0, 0, 0}
        };
 
@@ -2037,11 +2109,20 @@ int main(int argc, char **argv)	{
                                               case 't': desired *= 1024ULL * 1024ULL * 1024ULL * 1024ULL; break;
                                       }
                               }
-                              uint64_t n; uint32_t k;
-                              bloom_entries_for_bytes(desired, &n, &k);
-                              mapped_entries_override = n;
-                              mapped_error_override = powl(0.5L, (long double)k);
+                              /* --mapped-size is the TOTAL on-disk budget
+                               * across all 3 BSGS bloom layers (L1, L2, L3)
+                               * and all 256 leading-byte shards per layer.
+                               * Resolution into per-layer entries happens
+                               * later, after bsgs_m / bsgs_m2 / bsgs_m3 are
+                               * known, so each layer gets bytes proportional
+                               * to its item count. (See split-budget block
+                               * below the BSGS_M derivation.) */
+                              mapped_total_bytes_budget = desired;
+                              mapped_error_override = 1.0e-6L;
                               mapped_sizing_opts++;
+                              printf("[+] --mapped-size %s total budget recorded"
+                                     " (will be split across L1+L2+L3 by item ratio at init time)\n",
+                                     optarg);
                      } else if (strcmp(long_options[option_index].name, "mapped-chunks") == 0) {
                              FLAGMAPPED = 1;
                              mapped_chunks = strtoul(optarg, NULL, 10);
@@ -2149,6 +2230,36 @@ int main(int argc, char **argv)	{
                               FLAGFORCEPTABLEREBUILD = 1;
                       } else if (strcmp(long_options[option_index].name, "io-verbose") == 0) {
                               FLAGIOVERBOSE = 1;
+                      } else if (strcmp(long_options[option_index].name, "honest-counter") == 0) {
+                              FLAGHONESTCOUNTER = 1;
+                              printf("[+] Honest counter mode: reports scalar-coverage/s AND bloom-lookups/s\n");
+                      } else if (strcmp(long_options[option_index].name, "gpu-bloom") == 0) {
+                              FLAGGPUBLOOM = 1;
+                              printf("[+] GPU bloom offload enabled (build with CUDA=1 required)\n");
+                      } else if (strcmp(long_options[option_index].name, "bsgs-endo") == 0) {
+                              if (!optarg || strcmp(optarg, "off") == 0) {
+                                      FLAGBSGSENDO = BSGS_ENDO_OFF;
+                                      printf("[+] BSGS endomorphism: off\n");
+                              } else if (strcmp(optarg, "keyhunt") == 0) {
+                                      FLAGBSGSENDO = BSGS_ENDO_KEYHUNT;
+                                      FLAGENDOMORPHISM = 1;
+                                      lambda.SetBase16("5363ad4cc05c30e0a5261c028812645a122e22ea20816678df02967c1b23bd72");
+                                      lambda2.SetBase16("ac9c52b33fa3cf1f5ad9e3fd77ed9ba4a880b9fc8ec739c2e0cfc810b51283ce");
+                                      beta.SetBase16("7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee");
+                                      beta2.SetBase16("851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40");
+                                      printf("[+] BSGS endomorphism: keyhunt-style (6-orbit shared-ModInv probes)\n");
+                              } else if (strcmp(optarg, "glv12") == 0) {
+                                      FLAGBSGSENDO = BSGS_ENDO_GLV12;
+                                      FLAGENDOMORPHISM = 1;
+                                      lambda.SetBase16("5363ad4cc05c30e0a5261c028812645a122e22ea20816678df02967c1b23bd72");
+                                      lambda2.SetBase16("ac9c52b33fa3cf1f5ad9e3fd77ed9ba4a880b9fc8ec739c2e0cfc810b51283ce");
+                                      beta.SetBase16("7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee");
+                                      beta2.SetBase16("851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40");
+                                      printf("[+] BSGS endomorphism: GLV-12 (lambda^-1 orbit recovery)\n");
+                              } else {
+                                      fprintf(stderr, "[E] --bsgs-endo: expected off|keyhunt|glv12, got '%s'\n", optarg);
+                                      exit(EXIT_FAILURE);
+                              }
                      } else if (strcmp(long_options[option_index].name, "bloom-bytes") == 0) {
                              FLAGMAPPED = 1;
                              char *end;
@@ -2161,11 +2272,15 @@ int main(int argc, char **argv)	{
                                              case 't': desired *= 1024ULL * 1024ULL * 1024ULL * 1024ULL; break;
                                      }
                              }
-                             uint64_t n; uint32_t k;
-                             bloom_entries_for_bytes(desired, &n, &k);
-                             mapped_entries_override = n;
-                             mapped_error_override = powl(0.5L, (long double)k);
+                             /* Same semantics as --mapped-size: total across
+                              * all 3 layers x 256 shards. Split is deferred
+                              * until items_bloom values are known. */
+                             mapped_total_bytes_budget = desired;
+                             mapped_error_override = 1.0e-6L;
                              mapped_sizing_opts++;
+                             printf("[+] --bloom-bytes %s total budget recorded"
+                                    " (will be split across L1+L2+L3 by item ratio at init time)\n",
+                                    optarg);
                       } else if (strcmp(long_options[option_index].name, "create-mapped") == 0) {
                               FLAGMAPPED = 1;
                               FLAGCREATEMAPPED = 1;
@@ -2174,8 +2289,11 @@ int main(int argc, char **argv)	{
                                       uint64_t n; uint32_t k;
                                       bloom_entries_for_bytes(desired, &n, &k);
                                       mapped_entries_override = n;
-                                      mapped_error_override = powl(0.5L, (long double)k);
+                                      mapped_error_override = 1.0e-6L;
                                       mapped_sizing_opts++;
+                                      printf("[+] --create-mapped -> %" PRIu64
+                                             " entries, %u hash funcs, "
+                                             "target error 1e-6\n", n, k);
                               }
                       } else if (strcmp(long_options[option_index].name, "tmpdir") == 0) {
                               tmpdir_path = optarg;
@@ -2540,6 +2658,19 @@ exit(EXIT_FAILURE);
 }
 
        if (FLAGCREATEMAPPED) {
+               /* --create-mapped is a one-off file creator outside the BSGS
+                * 3-layer setup. If the user passed --bloom-bytes/--mapped-size
+                * (recorded in mapped_total_bytes_budget), derive a single
+                * (entries, error) pair locally for this standalone file. */
+               if (!mapped_entries_override && mapped_total_bytes_budget > 0) {
+                       uint64_t n; uint32_t k;
+                       bloom_entries_for_bytes(mapped_total_bytes_budget, &n, &k);
+                       mapped_entries_override = n;
+                       mapped_error_override   = 1.0e-6L;
+                       printf("[+] --create-mapped: %" PRIu64 " bytes -> %" PRIu64
+                              " entries, %u hashes\n",
+                              mapped_total_bytes_budget, n, k);
+               }
                if (!mapped_entries_override) {
                        fprintf(stderr, "[E] --create-mapped requires size via argument or --bloom-bytes\n");
                        exit(EXIT_FAILURE);
@@ -2593,9 +2724,24 @@ exit(EXIT_FAILURE);
                 exit(EXIT_FAILURE);
         }
 
-	if(  FLAGBSGSMODE == MODE_BSGS && FLAGENDOMORPHISM)	{
-		fprintf(stderr,"[E] Endomorphism doesn't work with BSGS\n");
-		exit(EXIT_FAILURE);
+	/*
+	 * NOTE: prior code had the broken guard
+	 *   if (FLAGBSGSMODE == MODE_BSGS && FLAGENDOMORPHISM) ...
+	 * which compared the BSGS submode (sequential/backward/...) against
+	 * MODE_BSGS=2 -- effectively only blocking the "both" submode. It
+	 * also produced a fake 6x display multiplier in the BSGS rate path
+	 * even though the BSGS thread loops never actually probed orbits.
+	 *
+	 * New rule: in MODE_BSGS, endomorphism only takes effect when the
+	 * user opts in via --bsgs-endo=keyhunt|glv12. Plain `-e` in BSGS is
+	 * accepted but silently ignored (no orbit probes, counter stays
+	 * honest). Outside MODE_BSGS, `-e` keeps its original 6x meaning.
+	 */
+	if (FLAGMODE == MODE_BSGS && FLAGENDOMORPHISM &&
+	    FLAGBSGSENDO == BSGS_ENDO_OFF) {
+		fprintf(stderr, "[W] -e/--endomorphism in BSGS mode without "
+		                "--bsgs-endo=keyhunt|glv12 has no effect; ignoring.\n");
+		FLAGENDOMORPHISM = 0;
 	}
 	
 	
@@ -2841,6 +2987,31 @@ exit(EXIT_FAILURE);
                 bsgs_point_number = (uint32_t)OriginalPointsBSGS.size();
                 bsgs_found.assign(bsgs_point_number,0);
 
+                /*
+                 * Build endomorphism-twisted target arrays if --bsgs-endo
+                 * is enabled. Twist applies:  Q' = (lambda^-1) * Q,
+                 * which on secp256k1 is just (beta^-1 * Qx, Qy) since
+                 * lambda * (x,y) = (beta*x, y).
+                 *
+                 * beta^-1 = beta^2  (because beta is a primitive cube root of 1 mod P)
+                 */
+                if (FLAGBSGSENDO != BSGS_ENDO_OFF) {
+                        OriginalPointsBSGS_endo[0].clear();
+                        OriginalPointsBSGS_endo[0].reserve(bsgs_point_number);
+                        OriginalPointsBSGS_endo[1].clear();
+                        OriginalPointsBSGS_endo[1].reserve(bsgs_point_number);
+                        for (uint32_t k = 0; k < bsgs_point_number; k++) {
+                                Point Qinv1 = OriginalPointsBSGS[k];
+                                Qinv1.x.ModMulK1(&beta2);   /* lambda^-1 . Q */
+                                Point Qinv2 = OriginalPointsBSGS[k];
+                                Qinv2.x.ModMulK1(&beta);    /* lambda^-2 . Q */
+                                OriginalPointsBSGS_endo[0].push_back(Qinv1);
+                                OriginalPointsBSGS_endo[1].push_back(Qinv2);
+                        }
+                        printf("[+] Built endomorphism-twisted target arrays for %u points\n",
+                               bsgs_point_number);
+                }
+
 		if(bsgs_point_number > 0)	{
 			printf("[+] Added %u points from file\n",bsgs_point_number);
 		}
@@ -3072,6 +3243,58 @@ free(hextemp);
 		
                 if (mapped_chunks == 0) {
                         mapped_chunks = 1;
+                }
+                /*
+                 * If the user supplied a TOTAL byte budget via --mapped-size or
+                 * --bloom-bytes, distribute it now across L1+L2+L3 in proportion
+                 * to each layer's item count. This keeps every shard at the same
+                 * bits-per-entry (i.e., the same false-positive rate), which is
+                 * what users actually want when they say "give me a 100 GB total
+                 * bloom".
+                 *
+                 * Bloom theory: bits = items * bpe. So if we pick a single bpe
+                 * shared by all layers, then bytes scale linearly with items
+                 * across L1/L2/L3 -- exactly the proportional split we want.
+                 *
+                 * Total budget breakdown (per shard, then x 256 shards x 3 layers):
+                 *   total_bits = bpe * 256 * (items_L1 + items_L2 + items_L3)
+                 *   bpe        = (total_bytes * 8) / [256 * (items_L1+L2+L3)]
+                 *
+                 * We then derive a per-layer mapped_entries_override equal to
+                 * each layer's items_bloom* count; initBloomFilterMapped will
+                 * use it directly via the existing override path.
+                 */
+                if (mapped_total_bytes_budget > 0) {
+                        uint64_t total_items = (uint64_t)256 *
+                                               (itemsbloom + itemsbloom2 + itemsbloom3);
+                        if (total_items == 0) total_items = 1;
+                        long double bpe = (long double)(mapped_total_bytes_budget * 8ULL) /
+                                          (long double)total_items;
+                        /* Below ~4 bits/entry the filter saturates to all-1s
+                         * after inserting all items and provides no speedup. */
+                        if (bpe < 4.0L) {
+                                fprintf(stderr,
+                                        "[W] --mapped-size %.2f GB / %" PRIu64 " total items"
+                                        " -> only %.2Lf bits/entry (need ~10+ for useful filter)\n",
+                                        (double)mapped_total_bytes_budget / (1024.0*1024.0*1024.0),
+                                        total_items, bpe);
+                        }
+                        /* Above ~64 bits/entry the bloom math underflows
+                         * (error = 0.5^k = 0). Clamp so we don't end up
+                         * passing error=0 into bloom_init which rejects it.
+                         * The user has supplied more bytes than this filter
+                         * needs; the surplus stays unused. */
+                        if (bpe > 64.0L) bpe = 64.0L;
+                        long double err = expl(-bpe * 0.480453013918201L * 0.693147180559945L);
+                        if (err <= 0.0L)  err = 1.0e-15L; /* paranoid floor */
+                        if (err >= 1.0L)  err = 0.5L;
+                        mapped_error_override = err;
+                        mapped_entries_override = 0;
+                        printf("[+] Total budget %.2f GB split: L1=%" PRIu64 " L2=%" PRIu64
+                               " L3=%" PRIu64 " items/shard"
+                               " @ %.2Lf bits/entry, error=%.2Le\n",
+                               (double)mapped_total_bytes_budget / (1024.0*1024.0*1024.0),
+                               itemsbloom, itemsbloom2, itemsbloom3, bpe, err);
                 }
                 long double bloom_error = mapped_error_override ? mapped_error_override : 0.000001L;
                 uint64_t shard_bytes = bloom_bytes_for_entries_error(itemsbloom, bloom_error);
@@ -4401,7 +4624,16 @@ free(hextemp);
 		tid = (pthread_t *) calloc(NTHREADS,sizeof(pthread_t));
 #endif
 		checkpointer((void *)tid,__FILE__,"calloc","tid" ,__LINE__ -1 );
-		
+
+		if (FLAGGPUBLOOM) {
+			if (gpu_bloom_init(bloom_bP)) {
+				printf("[+] GPU bloom initialized successfully\n");
+			} else {
+				fprintf(stderr, "[W] GPU bloom init failed; continuing with CPU bloom\n");
+				FLAGGPUBLOOM = 0;
+			}
+		}
+
 		for(j= 0;j < NTHREADS; j++)	{
 			tt = (tothread*) malloc(sizeof(struct tothread));
 			checkpointer((void *)tt,__FILE__,"malloc","tt" ,__LINE__ -1 );
@@ -4557,9 +4789,30 @@ free(hextemp);
                                  * style flows).
                                  */
                                 if (FLAGMODE == MODE_BSGS) {
-                                        pretotal.Set(&debugcount_mpz);
-                                        pretotal.Mult(bsgs_steps_total.load(std::memory_order_relaxed));
-                                        total.Add(&pretotal);
+                                        /*
+                                         * Prefer the live giant-step counter when it's
+                                         * advancing -- it gives correct keys/s readings
+                                         * within the first second of a run. The legacy
+                                         * `bsgs_steps_total` counter only fires after a
+                                         * full thread-slice completes, which can take
+                                         * minutes to hours at production N.
+                                         *
+                                         * Each live tick = one inner-while iteration =
+                                         * CPU_GRP_SIZE candidate scalars examined.
+                                         */
+                                        uint64_t live = bsgs_live_steps.load(std::memory_order_relaxed);
+                                        if (live > 0) {
+                                                Int live_int;
+                                                live_int.SetInt64(live);
+                                                Int grp;
+                                                grp.SetInt64((uint64_t)CPU_GRP_SIZE);
+                                                live_int.Mult(&grp);
+                                                total.Add(&live_int);
+                                        } else {
+                                                pretotal.Set(&debugcount_mpz);
+                                                pretotal.Mult(bsgs_steps_total.load(std::memory_order_relaxed));
+                                                total.Add(&pretotal);
+                                        }
                                 } else {
                                         for (j = 0; j < NTHREADS; j++) {
                                                 pretotal.Set(&debugcount_mpz);
@@ -4569,7 +4822,20 @@ free(hextemp);
                                 }
 
                                 if (FLAGENDOMORPHISM) {
-                                        if (FLAGMODE == MODE_XPOINT) {
+                                        /*
+                                         * In MODE_BSGS the 6x display multiplier was a lie
+                                         * because the BSGS threads never probed orbits.
+                                         * Now we only multiply by 6 in BSGS when the user
+                                         * opted into --bsgs-endo=keyhunt|glv12 (in which
+                                         * case the giant-step path really does probe 6
+                                         * orbits per candidate, see angrygiant section).
+                                         */
+                                        if (FLAGMODE == MODE_BSGS) {
+                                                if (FLAGBSGSENDO != BSGS_ENDO_OFF) {
+                                                        total.Mult(6);
+                                                }
+                                                /* else: counter stays honest, no multiplier */
+                                        } else if (FLAGMODE == MODE_XPOINT) {
                                                 total.Mult(3);
                                         } else {
                                                 total.Mult(6);
@@ -4636,6 +4902,28 @@ free(hextemp);
                                 }
 
                                 print_status(buffer);
+                                if (FLAGHONESTCOUNTER && FLAGMODE == MODE_BSGS) {
+                                        /* Honest-counter mode: also report the
+                                         * actual compute rate (bloom lookups /
+                                         * giant-step iterations per second),
+                                         * separately from the scalar-coverage
+                                         * rate printed above. One giant step =
+                                         * one bloom probe + O(BSGS_M) point
+                                         * additions. */
+                                        uint64_t steps = bsgs_steps_total.load(std::memory_order_relaxed);
+                                        uint64_t secs = 0;
+                                        {
+                                                char *ss = seconds.GetBase10();
+                                                secs = strtoull(ss, NULL, 10);
+                                                free(ss);
+                                        }
+                                        double lookups_per_s = secs ? (double)steps / (double)secs : 0.0;
+                                        fprintf(stderr,
+                                                "\n[honest] giant_steps=%" PRIu64
+                                                " in %" PRIu64 "s  -> %.2f lookups/s"
+                                                " (scalar-coverage reported above is this * BSGS_N)\n",
+                                                steps, secs, lookups_per_s);
+                                }
 #ifdef _WIN64
                                 ReleaseMutex(bsgs_thread);
 #else
@@ -4649,6 +4937,21 @@ free(hextemp);
                 }
        }while(continue_flag);
        printf("\nEnd\n");
+       if (FLAGBSGSENDO != BSGS_ENDO_OFF) {
+               printf("[+] Endo lanes (probes/hits/recovers): L0=%llu/%llu/%llu | L1=%llu/%llu/%llu | L2=%llu/%llu/%llu\n",
+                      (unsigned long long)bsgs_endo_lane_probes[0].load(),
+                      (unsigned long long)bsgs_endo_lane_hits[0].load(),
+                      (unsigned long long)bsgs_endo_lane_recovers[0].load(),
+                      (unsigned long long)bsgs_endo_lane_probes[1].load(),
+                      (unsigned long long)bsgs_endo_lane_hits[1].load(),
+                      (unsigned long long)bsgs_endo_lane_recovers[1].load(),
+                      (unsigned long long)bsgs_endo_lane_probes[2].load(),
+                      (unsigned long long)bsgs_endo_lane_hits[2].load(),
+                      (unsigned long long)bsgs_endo_lane_recovers[2].load());
+       }
+       if (FLAGGPUBLOOM) {
+               gpu_bloom_shutdown();
+       }
        if (FLAGBPTABLEMAPPED) {
 #if !defined(_WIN64) || defined(__CYGWIN__)
                if(bptable_bytes){
@@ -6424,31 +6727,95 @@ pn.y.ModAdd(&GSn[i].y);
 					pts[0] = pn;
 
 					if(angry_giant) {
-						unsigned char giant_xpoints[CPU_GRP_SIZE][BSGS_BUFFERXPOINTLENGTH];
-						uint8_t giant_first_byte[CPU_GRP_SIZE];
-						uint32_t giant_bucket_positions[CPU_GRP_SIZE];
-						uint32_t giant_bucket_offsets[257];
-						uint32_t bucket_counts[256] = {0};
-						uint32_t bucket_sizes[256];
+						/*
+						 * Three "lanes" of giant X-coords are now possible:
+						 *   lane 0 : pts[i].x        (identity orbit)
+						 *   lane 1 : beta  * pts[i].x  (lambda  orbit)
+						 *   lane 2 : beta2 * pts[i].x  (lambda^2 orbit)
+						 * Negation orbit shares X-coord with the source, so 3
+						 * lanes capture all 6 endomorphism orbits at the
+						 * lookup level. Recovery picks among 6 candidate
+						 * scalars (see bsgs_secondcheck call below).
+						 *
+						 * When --bsgs-endo=off, only lane 0 runs (zero overhead).
+						 */
+						const int n_lanes = (FLAGBSGSENDO != BSGS_ENDO_OFF) ? 3 : 1;
+						unsigned char giant_xpoints[3][CPU_GRP_SIZE][BSGS_BUFFERXPOINTLENGTH];
+						uint8_t       giant_first_byte[3][CPU_GRP_SIZE];
+						uint32_t      giant_bucket_positions[3][CPU_GRP_SIZE];
+						uint32_t      giant_bucket_offsets[3][257];
+						uint32_t      bucket_counts[3][256] = {{0}};
+						uint32_t      bucket_sizes[3][256];
+						/* Pre-filter results from GPU bloom (-1=not-run,
+						 * 0=definitely-no, 1=maybe). Per-lane. */
+						int gpu_prefilter[3][CPU_GRP_SIZE];
+						for (int L = 0; L < 3; L++)
+							for (int i = 0; i < CPU_GRP_SIZE; i++)
+								gpu_prefilter[L][i] = -1;
 
 						for(int i = 0; i < CPU_GRP_SIZE; i++) {
-							pts[i].x.Get32Bytes(giant_xpoints[i]);
-							uint8_t bucket = giant_xpoints[i][0];
-							giant_first_byte[i] = bucket;
-							bucket_counts[bucket]++;
+							/* lane 0: identity */
+							pts[i].x.Get32Bytes(giant_xpoints[0][i]);
+							giant_first_byte[0][i] = giant_xpoints[0][i][0];
+							bucket_counts[0][giant_first_byte[0][i]]++;
+
+							if (n_lanes >= 2) {
+								/* lane 1: beta * pts[i].x  (lambda orbit X) */
+								Int bx;
+								bx.ModMulK1(&pts[i].x, &beta);
+								bx.Get32Bytes(giant_xpoints[1][i]);
+								giant_first_byte[1][i] = giant_xpoints[1][i][0];
+								bucket_counts[1][giant_first_byte[1][i]]++;
+
+								/* lane 2: beta2 * pts[i].x  (lambda^2 orbit X) */
+								Int b2x;
+								b2x.ModMulK1(&pts[i].x, &beta2);
+								b2x.Get32Bytes(giant_xpoints[2][i]);
+								giant_first_byte[2][i] = giant_xpoints[2][i][0];
+								bucket_counts[2][giant_first_byte[2][i]]++;
+							}
 						}
 
-						giant_bucket_offsets[0] = 0;
+						if (FLAGGPUBLOOM && gpu_bloom_available()) {
+							/* Batched GPU bloom check for the identity lane.
+							 * (Lanes 1/2 are CPU-only for now -- async GPU
+							 * 3-lane batch is in backlog item 4c.)
+							 */
+							if (!gpu_bloom_batch_check(
+								    (const uint8_t *)giant_xpoints[0],
+								    giant_first_byte[0],
+								    CPU_GRP_SIZE,
+								    gpu_prefilter[0])) {
+								/* reset to "not run" on transient failure */
+								for (int i = 0; i < CPU_GRP_SIZE; i++)
+									gpu_prefilter[0][i] = -1;
+							}
+						}
+
+						/*
+						 * Per-lane bucket sort + bloom probe.
+						 *   lane 0 : identity orbit (always runs)
+						 *   lane 1 : beta  orbit  (runs when --bsgs-endo!=off)
+						 *   lane 2 : beta2 orbit  (runs when --bsgs-endo!=off)
+						 *
+						 * On a hit in lane L > 0 we refine via
+						 * bsgs_secondcheck_endo against the lambda^-L target,
+						 * and the recovered scalar is multiplied by lambda^L
+						 * mod N inside bsgs_thirdcheck_endo before final
+						 * verification against the original target.
+						 */
+						for (int L = 0; L < n_lanes && bsgs_found[k] == 0; L++) {
+						giant_bucket_offsets[L][0] = 0;
 						for(int bucket = 0; bucket < 256; bucket++) {
-							giant_bucket_offsets[bucket + 1] = giant_bucket_offsets[bucket] + bucket_counts[bucket];
-							bucket_sizes[bucket] = bucket_counts[bucket];
-							bucket_counts[bucket] = 0;
+							giant_bucket_offsets[L][bucket + 1] = giant_bucket_offsets[L][bucket] + bucket_counts[L][bucket];
+							bucket_sizes[L][bucket] = bucket_counts[L][bucket];
+							bucket_counts[L][bucket] = 0;
 						}
 
 						for(int i = 0; i < CPU_GRP_SIZE; i++) {
-							uint8_t bucket = giant_first_byte[i];
-							uint32_t pos = giant_bucket_offsets[bucket] + bucket_counts[bucket]++;
-							giant_bucket_positions[pos] = i;
+							uint8_t bucket = giant_first_byte[L][i];
+							uint32_t pos = giant_bucket_offsets[L][bucket] + bucket_counts[L][bucket]++;
+							giant_bucket_positions[L][pos] = i;
 						}
 
 						uint8_t bucket_order[256];
@@ -6458,7 +6825,7 @@ pn.y.ModAdd(&GSn[i].y);
 
 						for(int i = 0; i < 255; i++) {
 							for(int j = i + 1; j < 256; j++) {
-								if(bucket_sizes[bucket_order[j]] > bucket_sizes[bucket_order[i]]) {
+								if(bucket_sizes[L][bucket_order[j]] > bucket_sizes[L][bucket_order[i]]) {
 									uint8_t tmp = bucket_order[i];
 									bucket_order[i] = bucket_order[j];
 									bucket_order[j] = tmp;
@@ -6468,8 +6835,8 @@ pn.y.ModAdd(&GSn[i].y);
 
 						for(int order_index = 0; order_index < 256 && bsgs_found[k]== 0; order_index++) {
 							uint8_t bucket = bucket_order[order_index];
-							uint32_t start = giant_bucket_offsets[bucket];
-							uint32_t end = giant_bucket_offsets[bucket + 1];
+							uint32_t start = giant_bucket_offsets[L][bucket];
+							uint32_t end = giant_bucket_offsets[L][bucket + 1];
 
 							if(start == end) {
 								continue;
@@ -6478,13 +6845,38 @@ pn.y.ModAdd(&GSn[i].y);
 							struct bloom *primary = &bloom_bP[bucket];
 
 							for(uint32_t pos = start; pos < end && bsgs_found[k]== 0; pos++) {
-								int i = (int)giant_bucket_positions[pos];
+								int i = (int)giant_bucket_positions[L][pos];
 
-								if(!bloom_check(primary,(char*)giant_xpoints[i],BSGS_BUFFERXPOINTLENGTH)) {
+								/* GPU bloom pre-filter: if GPU definitively
+								 * said "no hit" (0), skip CPU bloom_check
+								 * entirely. GPU uses the same XXH64 recipe,
+								 * so result is byte-exact equivalent. */
+								if (gpu_prefilter[L][i] == 0) {
 									continue;
 								}
 
-								r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
+								bsgs_endo_lane_probes[L].fetch_add(1, std::memory_order_relaxed);
+								if(!bloom_check(primary,(char*)giant_xpoints[L][i],BSGS_BUFFERXPOINTLENGTH)) {
+									continue;
+								}
+								/* L1 bloom hit (post pre-filter, post check) */
+								bsgs_endo_lane_hits[L].fetch_add(1, std::memory_order_relaxed);
+
+								if (L == 0) {
+									r = bsgs_secondcheck(&base_key,((j*1024) + i),k,&keyfound);
+								} else {
+									/* lane recovery: orbit L hit -> refine
+									 * against lambda^-L * target, then map
+									 * recovered scalar back via lambda^L. */
+									Point *twisted_target = &OriginalPointsBSGS_endo[L - 1][k];
+									r = bsgs_secondcheck_endo(&base_key,
+									                          ((j*1024) + i), k,
+									                          twisted_target, L,
+									                          &keyfound);
+								}
+								if (r) {
+									bsgs_endo_lane_recovers[L].fetch_add(1, std::memory_order_relaxed);
+								}
 								if(r)   {
 								hextemp = keyfound.GetBase16();
 								printf("[+] Thread Key found privkey %s   \
@@ -6512,6 +6904,18 @@ pn.y.ModAdd(&GSn[i].y);
 								#endif
 
 								bsgs_found[k] = 1;
+								if (FLAGBSGSENDO != BSGS_ENDO_OFF) {
+									printf("[+] Endo lanes (probes/hits/recovers): L0=%llu/%llu/%llu | L1=%llu/%llu/%llu | L2=%llu/%llu/%llu\n",
+									       (unsigned long long)bsgs_endo_lane_probes[0].load(),
+									       (unsigned long long)bsgs_endo_lane_hits[0].load(),
+									       (unsigned long long)bsgs_endo_lane_recovers[0].load(),
+									       (unsigned long long)bsgs_endo_lane_probes[1].load(),
+									       (unsigned long long)bsgs_endo_lane_hits[1].load(),
+									       (unsigned long long)bsgs_endo_lane_recovers[1].load(),
+									       (unsigned long long)bsgs_endo_lane_probes[2].load(),
+									       (unsigned long long)bsgs_endo_lane_hits[2].load(),
+									       (unsigned long long)bsgs_endo_lane_recovers[2].load());
+								}
 								salir = 1;
 								for(l = 0; l < bsgs_point_number && salir; l++) {
 									salir &= bsgs_found[l];
@@ -6523,6 +6927,7 @@ pn.y.ModAdd(&GSn[i].y);
 								}
 							}
 						}
+						} /* end per-lane for(L) */
 					} else {
 						for(int i = 0; i<CPU_GRP_SIZE && bsgs_found[k]== 0; i++) {
 							pts[i].x.Get32Bytes((unsigned char*)xpoint_raw);
@@ -6585,6 +6990,11 @@ pn.y.ModAdd(&GSn[i].y);
 					startP = pp;
 					
 					j++;
+					/* Live counter: each iteration of the inner while(j)
+					 * covers CPU_GRP_SIZE candidate scalars (one giant
+					 * step). Bump bsgs_live_steps so the keys/s reading
+					 * updates within the first second. */
+					bsgs_live_steps.fetch_add(1, std::memory_order_relaxed);
 				} // end while
 			}// End if 
 		}
@@ -6839,7 +7249,7 @@ pn.y.ModAdd(&GSn[i].y);
 					startP = pp;
 					
 					j++;
-					
+					bsgs_live_steps.fetch_add(1, std::memory_order_relaxed);
 				}	//End While
 			}	//End if
 		} // End for with k bsgs_point_number
@@ -6953,6 +7363,167 @@ int bsgs_thirdcheck(Int *start_range,uint32_t a,uint32_t k_index,Int *privatekey
 		}
 		i++;
 	}while(i < 32 && !found);
+	return found;
+}
+
+/*
+ * Endomorphism-aware second check. Identical to bsgs_secondcheck except
+ * that it operates on a caller-supplied target_override Point and
+ * dispatches to bsgs_thirdcheck_endo for the L3 refinement (which also
+ * uses the override target). recover_lane is plumbed through; the final
+ * scalar mapping happens in bsgs_thirdcheck_endo where the binary search
+ * yields a privkey candidate.
+ */
+int bsgs_thirdcheck_endo(Int *start_range, uint32_t a, uint32_t k_index,
+                         Point *target_override, int recover_lane,
+                         Int *privatekey);
+
+int bsgs_secondcheck_endo(Int *start_range, uint32_t a, uint32_t k_index,
+                          Point *target_override, int recover_lane,
+                          Int *privatekey)
+{
+	int i = 0, found = 0, r = 0;
+	Int base_key;
+	Point base_point, point_aux;
+	Point BSGS_Q, BSGS_S, BSGS_Q_AMP;
+	char xpoint_raw[32];
+
+	base_key.Set(&BSGS_M_double);
+	base_key.Mult((uint64_t) a);
+	base_key.Add(start_range);
+
+	base_point = secp->ComputePublicKey(&base_key);
+	point_aux  = secp->Negation(base_point);
+
+	/* BSGS_S = target_override - base_key  */
+	BSGS_S = secp->AddDirect(*target_override, point_aux);
+	BSGS_Q.Set(BSGS_S);
+	do {
+		BSGS_Q_AMP = secp->AddDirect(BSGS_Q, BSGS_AMP2[i]);
+		BSGS_S.Set(BSGS_Q_AMP);
+		BSGS_S.x.Get32Bytes((unsigned char *) xpoint_raw);
+		r = bloom_check(&bloom_bPx2nd[(uint8_t) xpoint_raw[0]], xpoint_raw, 32);
+		if (r) {
+			found = bsgs_thirdcheck_endo(&base_key, i, k_index,
+			                             target_override, recover_lane,
+			                             privatekey);
+		}
+		i++;
+	} while (i < 32 && !found);
+	return found;
+}
+
+/*
+ * Endomorphism-aware third check. After binary-searching the bPtable
+ * yields a candidate scalar k_cand, we map it back to the original-target
+ * scalar via the recover_lane:
+ *   lane 0: k = k_cand
+ *   lane 1: k = lambda  * k_cand mod N
+ *   lane 2: k = lambda^2 * k_cand mod N
+ *
+ * Each candidate is verified against the *original* target
+ * OriginalPointsBSGS[k_index], NOT the twisted target. That ensures the
+ * privkey we save is the real key for the user-supplied pubkey.
+ */
+int bsgs_thirdcheck_endo(Int *start_range, uint32_t a, uint32_t k_index,
+                         Point *target_override, int recover_lane,
+                         Int *privatekey)
+{
+	uint64_t j_start = 0, j_end = 0;
+	int i = 0, found = 0, r = 0;
+	Int base_key, calculatedkey;
+	Point base_point, point_aux;
+	Point BSGS_Q, BSGS_S, BSGS_Q_AMP;
+	char xpoint_raw[32];
+
+	base_key.SetInt32(a);
+	base_key.Mult(&BSGS_M2_double);
+	base_key.Add(start_range);
+
+	base_point = secp->ComputePublicKey(&base_key);
+	point_aux  = secp->Negation(base_point);
+
+	BSGS_S = secp->AddDirect(*target_override, point_aux);
+	BSGS_Q.Set(BSGS_S);
+
+	do {
+		BSGS_Q_AMP = secp->AddDirect(BSGS_Q, BSGS_AMP3[i]);
+		BSGS_S.Set(BSGS_Q_AMP);
+		BSGS_S.x.Get32Bytes((unsigned char *) xpoint_raw);
+		r = bloom_check(&bloom_bPx3rd[(uint8_t) xpoint_raw[0]], xpoint_raw, 32);
+		if (r) {
+			r = bsgs_searchbinary(bPtable, xpoint_raw,
+			                      (int64_t) ptable_slice_len,
+			                      &j_start, &j_end);
+			if (r) {
+				for (uint64_t j = j_start; j <= j_end && !found; j++) {
+					Int k_cand;
+					/* + branch */
+					calcualteindex(i, &calculatedkey);
+					k_cand.Set(&calculatedkey);
+					k_cand.Add((uint64_t)(j + 1));
+					k_cand.Add(&base_key);
+					/* lane recovery: k_real = lambda^lane * k_cand mod N */
+					Int k_real;
+					k_real.Set(&k_cand);
+					if (recover_lane == 1) {
+						k_real.Mult(&lambda);
+						k_real.Mod(&secp->order);
+					} else if (recover_lane == 2) {
+						k_real.Mult(&lambda2);
+						k_real.Mod(&secp->order);
+					}
+					point_aux = secp->ComputePublicKey(&k_real);
+					if (point_aux.x.IsEqual(&OriginalPointsBSGS[k_index].x)) {
+						privatekey->Set(&k_real);
+						found = 1;
+						break;
+					}
+					/* - branch */
+					calcualteindex(i, &calculatedkey);
+					k_cand.Set(&calculatedkey);
+					k_cand.Sub((uint64_t)(j + 1));
+					k_cand.Add(&base_key);
+					k_real.Set(&k_cand);
+					if (recover_lane == 1) {
+						k_real.Mult(&lambda);
+						k_real.Mod(&secp->order);
+					} else if (recover_lane == 2) {
+						k_real.Mult(&lambda2);
+						k_real.Mod(&secp->order);
+					}
+					point_aux = secp->ComputePublicKey(&k_real);
+					if (point_aux.x.IsEqual(&OriginalPointsBSGS[k_index].x)) {
+						privatekey->Set(&k_real);
+						found = 1;
+					}
+				}
+			}
+		} else {
+			/* JLP edge case: same x => exact negation of AMP3[i] */
+			if (BSGS_Q.x.IsEqual(&BSGS_AMP3[i].x)) {
+				Int k_cand;
+				calcualteindex(i, &calculatedkey);
+				k_cand.Set(&calculatedkey);
+				k_cand.Add(&base_key);
+				Int k_real;
+				k_real.Set(&k_cand);
+				if (recover_lane == 1) {
+					k_real.Mult(&lambda);
+					k_real.Mod(&secp->order);
+				} else if (recover_lane == 2) {
+					k_real.Mult(&lambda2);
+					k_real.Mod(&secp->order);
+				}
+				point_aux = secp->ComputePublicKey(&k_real);
+				if (point_aux.x.IsEqual(&OriginalPointsBSGS[k_index].x)) {
+					privatekey->Set(&k_real);
+					found = 1;
+				}
+			}
+		}
+		i++;
+	} while (i < 32 && !found);
 	return found;
 }
 
@@ -7610,6 +8181,7 @@ pn.y.ModAdd(&GSn[i].y);
 					startP = pp;
 					
 					j++;
+					bsgs_live_steps.fetch_add(1, std::memory_order_relaxed);
 				}//while all the aMP points
 			}// End if 
 		}
@@ -7868,6 +8440,7 @@ pn.y.ModAdd(&GSn[i].y);
 					pp.y.ModSub(&_2GSn.y);
 					startP = pp;
 					j++;
+					bsgs_live_steps.fetch_add(1, std::memory_order_relaxed);
 				}//while all the aMP points
 			}// End if 
 		}
@@ -8154,6 +8727,7 @@ void *thread_process_bsgs_both(void *vargp)	{
 						startP = pp;
 						
 						j++;
+						bsgs_live_steps.fetch_add(1, std::memory_order_relaxed);
 					}//while all the aMP points
 			}// End if 
 		}
@@ -9197,28 +9771,37 @@ uint64_t bloom_bytes_for_entries_error(uint64_t entries, long double error) {
 }
 
 void bloom_entries_for_bytes(uint64_t bytes, uint64_t *entries, uint32_t *hashes) {
-       uint64_t best_n = 0;
-       uint32_t best_k = 0;
-       for (uint32_t bits = 20; bits <= 64; bits += 2) {
-               uint64_t n = 1ULL << bits;
-               uint32_t k = 1U << ((bits - 20) / 2);
-               long double error = powl(0.5L, (long double)k);
-               uint64_t need = bloom_bytes_for_entries_error(n, error);
-               if (need > bytes) {
-                       break;
-               }
-               best_n = n;
-               best_k = k;
+       /*
+        * Correct inverse sizer. Given target byte budget, back-solve how many
+        * entries fit at a sane target error rate and compute Bloom's optimal
+        * k from the resulting bits-per-entry ratio.
+        *
+        * Bloom theory: for m bits and n entries, optimal k* = (m/n) * ln(2).
+        * Error at optimal k is (1/2)^k*. We target error=1e-6 by default which
+        * is the same floor the rest of the code expects; this keeps the error
+        * stable regardless of the bucket size.
+        *
+        * The previous implementation iterated bits=20..64 step 2 with
+        * k = 1 << ((bits-20)/2), giving k=1024 at bits=40 and error=2^-1024,
+        * which then back-solved to a 128 TiB bloom. That blew up any large
+        * --bloom-bytes / --mapped-size request. Fixed now.
+        */
+       const long double target_error = 1.0e-6L;
+       const long double bpe = -logl(target_error) / 0.480453013918201L;
+       /* bits_per_entry at e=1e-6 is ~19.17 */
+       uint64_t bits = bytes * 8ULL;
+       uint64_t n = (uint64_t)((long double)bits / bpe);
+       if (n == 0) {
+               n = 1;
        }
-       if (best_n == 0) {
-               best_n = 1ULL << 20;
-               best_k = 1;
-       }
+       uint32_t k = (uint32_t)ceill(0.693147180559945L * bpe);
+       if (k < 1) k = 1;
+       if (k > 32) k = 32; /* sanity clamp -- optimal k at e=1e-6 is ~13 */
        if (entries) {
-               *entries = best_n;
+               *entries = n;
        }
        if (hashes) {
-               *hashes = best_k;
+               *hashes = k;
        }
 }
 

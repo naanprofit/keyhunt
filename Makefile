@@ -15,6 +15,20 @@ endif
 CXXFLAGS := $(ARCH_FLAGS) -Wall -Wextra -Wno-deprecated-copy -Ofast -ftree-vectorize
 CFLAGS := $(ARCH_FLAGS) -Wall -Wextra -Ofast -ftree-vectorize
 
+# CUDA support: build with `make CUDA=1` to enable --gpu-bloom offload.
+CUDA ?= 0
+ifeq ($(CUDA),1)
+NVCC := nvcc
+NVCC_ARCH ?= sm_89
+NVCC_FLAGS := -O3 -arch=$(NVCC_ARCH) -Xcompiler=-fPIC
+GPU_OBJ := gpu_bloom.o
+GPU_CXXFLAGS := -DENABLE_GPU_BLOOM
+GPU_LDFLAGS := -L/usr/local/cuda/lib64 -lcudart -lcuda
+else
+GPU_OBJ := gpu_bloom_stub.o
+GPU_CXXFLAGS :=
+GPU_LDFLAGS :=
+endif
 
 default:
 	g++ $(CXXFLAGS) -flto -c oldbloom/bloom.cpp -o oldbloom.o
@@ -40,7 +54,12 @@ else
 	g++ $(CXXFLAGS) -flto -c hash/ripemd160_sse.cpp -o hash/ripemd160_sse.o
 	g++ $(CXXFLAGS) -flto -c hash/sha256_sse.cpp -o hash/sha256_sse.o
 endif
-	g++ $(CXXFLAGS) -o keyhunt keyhunt.cpp base58.o rmd160.o $(HASH_OBJS) bloom.o oldbloom.o xxhash.o util.o Int.o Point.o SECP256K1.o IntMod.o Random.o IntGroup.o sha3.o keccak.o -lm -lpthread
+ifeq ($(CUDA),1)
+	$(NVCC) $(NVCC_FLAGS) -c gpu_bloom.cu -o gpu_bloom.o
+else
+	gcc $(CFLAGS) -c gpu_bloom_stub.c -o gpu_bloom_stub.o
+endif
+	g++ $(CXXFLAGS) $(GPU_CXXFLAGS) -o keyhunt keyhunt.cpp base58.o rmd160.o $(HASH_OBJS) bloom.o oldbloom.o xxhash.o util.o Int.o Point.o SECP256K1.o IntMod.o Random.o IntGroup.o sha3.o keccak.o $(GPU_OBJ) $(GPU_LDFLAGS) -lm -lpthread
 	rm -r *.o
 
 clean:
