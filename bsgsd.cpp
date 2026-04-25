@@ -58,6 +58,7 @@ email: albertobsd@gmail.com
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h> // for inet_addr()
+#include <netdb.h>     // for getaddrinfo() / freeaddrinfo()
 #include <pthread.h>   // for pthread functions
 
 #define PORT 8080
@@ -198,6 +199,33 @@ pthread_t *tid = NULL;
 pthread_mutex_t write_keys;
 pthread_mutex_t write_random;
 pthread_mutex_t mutex_bsgs_thread;
+
+/*
+ * Server-side single-flight mutex.  Held by client_handler for the
+ * duration of a single search.  Required because the BSGS search relies
+ * on global state (BSGS_CURRENT, n_range_start/end, OriginalPointsBSGS,
+ * OriginalPointsBSGS_endo, bsgs_found, BSGSkeyfound, lane counters).
+ *
+ * The README has always said "one client at a time" but the code did
+ * NOT enforce it -- two simultaneous clients would race on those
+ * globals and produce wrong results or crashes.  Now serialized: a
+ * second client connects, blocks here, and runs after the first
+ * search completes.
+ */
+pthread_mutex_t single_search_mutex;
+
+/* Set by SIGINT / SIGTERM handler so the accept() loop exits cleanly
+ * instead of leaving the listening socket dangling. */
+static volatile sig_atomic_t shutdown_requested = 0;
+static int server_fd_for_shutdown = -1;
+static void shutdown_signal_handler(int sig) {
+    (void)sig;
+    shutdown_requested = 1;
+    if(server_fd_for_shutdown >= 0){
+        /* Force accept() to return so the loop can observe the flag. */
+        shutdown(server_fd_for_shutdown, SHUT_RDWR);
+    }
+}
 pthread_mutex_t *bPload_mutex;
 
 uint64_t FINISHED_THREADS_COUNTER = 0;
@@ -769,9 +797,13 @@ int main(int argc, char **argv)	{
 	pthread_mutex_init(&write_keys,NULL);
 	pthread_mutex_init(&write_random,NULL);
 	pthread_mutex_init(&mutex_bsgs_thread,NULL);
+	pthread_mutex_init(&single_search_mutex,NULL);
 
 	srand(time(NULL));
 	signal(SIGPIPE, SIG_IGN);
+	/* Graceful shutdown on Ctrl-C / SIGTERM. */
+	signal(SIGINT, shutdown_signal_handler);
+	signal(SIGTERM, shutdown_signal_handler);
 
 	secp = new Secp256K1();
 	secp->Init();
@@ -2308,13 +2340,43 @@ int main(int argc, char **argv)	{
     }
 
     address.sin_family = AF_INET;
+    /*
+     * Bind address resolution.  Three paths:
+     *   1. NULL/empty/"0.0.0.0"  -> bind INADDR_ANY (all interfaces; default).
+     *   2. Numeric IPv4 literal  -> use inet_pton fast-path.
+     *   3. Hostname              -> use getaddrinfo() to resolve.
+     *
+     * Previously the code used inet_pton only and silently fell back to
+     * INADDR_ANY on hostnames like "fozzie", which made -i useless for
+     * hostname-based binding.  Now hostnames resolve correctly and a
+     * hard error is reported only on truly unresolvable input.
+     */
+    char resolved_ip[INET_ADDRSTRLEN] = "";
     if(IP == NULL || IP[0] == '\0' || strcmp(IP,"0.0.0.0") == 0){
         IP = (char*)ip_default;
         address.sin_addr.s_addr = INADDR_ANY;
-    } else if(inet_pton(AF_INET, IP, &address.sin_addr) != 1){
-        fprintf(stderr,"[W] Invalid IP address: %s, defaulting to %s\n", IP, ip_default);
-        IP = (char*)ip_default;
-        address.sin_addr.s_addr = INADDR_ANY;
+        snprintf(resolved_ip, sizeof(resolved_ip), "0.0.0.0");
+    } else if(inet_pton(AF_INET, IP, &address.sin_addr) == 1){
+        /* Numeric IPv4 literal -- record canonical form for banner. */
+        inet_ntop(AF_INET, &address.sin_addr, resolved_ip, sizeof(resolved_ip));
+    } else {
+        /* Hostname -- resolve via getaddrinfo. */
+        struct addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        int gai = getaddrinfo(IP, NULL, &hints, &res);
+        if(gai == 0 && res != NULL){
+            address.sin_addr = ((struct sockaddr_in *)res->ai_addr)->sin_addr;
+            inet_ntop(AF_INET, &address.sin_addr, resolved_ip, sizeof(resolved_ip));
+            freeaddrinfo(res);
+        } else {
+            fprintf(stderr,"[W] Cannot resolve '%s' (%s); defaulting to %s\n",
+                    IP, gai_strerror(gai), ip_default);
+            IP = (char*)ip_default;
+            address.sin_addr.s_addr = INADDR_ANY;
+            snprintf(resolved_ip, sizeof(resolved_ip), "0.0.0.0");
+        }
     }
     address.sin_port = htons(port);
     // Binding socket to address
@@ -2322,17 +2384,34 @@ int main(int argc, char **argv)	{
         perror("bind failed");
         exit(EXIT_FAILURE);
     }
-	printf("[+] Listening in %s:%i\n",IP,port);
+    /* Banner reports BOTH the user-supplied label and the resolved IP so
+     * users can verify hostname resolution worked. */
+    if(strcmp(IP, resolved_ip) == 0){
+        printf("[+] Listening in %s:%i\n", resolved_ip, port);
+    } else {
+        printf("[+] Listening in %s (%s):%i\n", IP, resolved_ip, port);
+    }
     // Listening for incoming connections
     if (listen(server_fd, 3) < 0) {
         perror("listen failed");
         exit(EXIT_FAILURE);
     }
+    /* Publish server_fd to the signal handler so SIGINT/SIGTERM can
+     * shutdown() it and break us out of accept(). */
+    server_fd_for_shutdown = server_fd;
 
 	pthread_t tid;
-	while(1) {
+	while(!shutdown_requested) {
 		// Accepting incoming connection
 		if ((client_fd = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
+			if(shutdown_requested){
+				printf("\n[+] Shutdown requested, stopping accept loop\n");
+				break;
+			}
+			if(errno == EINTR){
+				/* signal interrupted; loop and recheck shutdown flag */
+				continue;
+			}
 			perror("accept failed");
 			exit(EXIT_FAILURE);
 		}
@@ -2357,11 +2436,17 @@ int main(int argc, char **argv)	{
 		}
 		else	{
 			pthread_detach(tid);
+			/* Connection-handed-off log.  The previous "Closing connection"
+			 * message was misleading because it fired BEFORE the detached
+			 * thread actually finished its search; the connection wasn't
+			 * closed yet.  Real close logging now happens at end of
+			 * client_handler(). */
+			printf("[+] Dispatched %s:%i to worker thread\n", clientIP, clientPort);
 		}
-		printf("[+] Closing conection from %s:%i\n",clientIP,clientPort);
 		fflush(stdout);
 	}
-	
+
+	printf("[+] Server shutting down, waiting on in-flight searches...\n");
 	close(server_fd);
 }
 
@@ -3817,6 +3902,11 @@ void* client_handler(void* arg) {
 		pthread_exit(NULL);
 	}
 
+	/* Acquire single-flight lock.  See declaration comment for rationale.
+	 * Held until just before close(client_fd) at end of this function so
+	 * the entire BSGS search and its global-state usage is serialized. */
+	pthread_mutex_lock(&single_search_mutex);
+
 	n_range_start.SetBase16(n_start_buf.data());
 	n_range_end.SetBase16(n_end_buf.data());
 	BSGS_CURRENT.Set(&n_range_start);
@@ -3964,6 +4054,9 @@ void* client_handler(void* arg) {
 		}
 	}
 	bsgs_found.store(false, std::memory_order_relaxed);
+
+	/* Release single-flight lock so any waiting client can proceed. */
+	pthread_mutex_unlock(&single_search_mutex);
 
 	close(client_fd);
 	pthread_exit(NULL);

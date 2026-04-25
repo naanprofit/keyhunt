@@ -15,14 +15,27 @@ Same as keyhunt we need to do
  - `-B angrygiant` Process the busiest giant-step buckets first to cut down on empty bloom checks
  - `--bsgs-block-count` / `--bsgs-block-size` Optional GGSB partitioning controls
  - `-n number` Length of the Range to scan each cycle, same as keyhunt
- - `-i ip`     IP for listening default is `127.0.0.1`
+ - `-i ip|hostname` IP or hostname for listening; default is `0.0.0.0` (all interfaces).
+   Hostnames (e.g. `-i fozzie`) resolve via `getaddrinfo()`.
  - `-p port`   Port for listening default is `8080`
+ - `--public`  Convenience alias for `-i 0.0.0.0`.
+ - `--bsgs-endo=off|keyhunt|glv12`  GLV endomorphism mode. Default `off`.
+   Note: on narrow puzzle ranges this runs ~2x SLOWER; only useful for
+   whole-keyspace scans. See research/BSGS_ENDOMORPHISM_WIRING_2026_04_24.md.
+ - `--honest-counter`  Emit `X-Steps` and per-lane `X-Lane-N-Probes/Hits/Recov`
+   HTTP headers with the actual scalar coverage and bloom-probe counts.
+ - `--gpu-bloom`  Reserved for GPU bloom prefilter (flag stub for now).
 
-bsgsd use the same keyhunt files `.blm` and `.tbl` 
+bsgsd uses the same keyhunt files `.blm` and `.tbl`.
 
 ### Server
-This program is an small and custom server without any protocol.
-By default the server only listen on `localhost` port `8080`
+This program is a small custom server with TCP single-line and HTTP POST
+JSON modes.  By default it listens on `0.0.0.0:8080` (all interfaces).
+Multiple concurrent client connections are serialized via a server-side
+single-flight mutex (the README has always said "one client at a time"
+but earlier versions of the code did not actually enforce it; now it
+does -- a second connection blocks until the first search completes).
+SIGINT / SIGTERM trigger graceful shutdown of the accept loop.
 ```
 localhost:8080
 ```
