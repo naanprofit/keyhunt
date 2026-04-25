@@ -110,3 +110,16 @@ endif
 	g++ $(CXXFLAGS) -o bsgsd bsgsd.cpp base58.o rmd160.o $(HASH_OBJS) bloom.o oldbloom.o xxhash.o util.o Int.o Point.o SECP256K1.o IntMod.o Random.o IntGroup.o sha3.o keccak.o -lm -lpthread
 	rm -r *.o
 
+# Standalone shared client library used by keyhunt, magic_wand, and any
+# future tool that wants pool-aware BSGSD access. Builds independently of
+# the main keyhunt/bsgsd binaries -- pure C++17 + POSIX sockets, no third-
+# party deps.
+libbsgsd_client.a: lib/bsgsd_client.cpp lib/bsgsd_client.h
+	g++ -std=c++17 -O2 -Wall -c lib/bsgsd_client.cpp -o lib/bsgsd_client.o
+	ar rcs libbsgsd_client.a lib/bsgsd_client.o
+	rm -f lib/bsgsd_client.o
+	@echo "[+] libbsgsd_client.a built; link with -lbsgsd_client -lpthread"
+
+clean_lib:
+	rm -f libbsgsd_client.a lib/*.o
+

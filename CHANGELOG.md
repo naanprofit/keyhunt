@@ -1,3 +1,167 @@
+# naanprofit fork CHANGELOG
+
+The entries below this line cover work on the `naanprofit/keyhunt` fork.
+Upstream alberto-bsd entries continue below the divider.
+
+## 2026-04-24 -- BSGSD parity port + bug fixes + shared client lib (this branch)
+
+Three commits on `codex/fix-bloom-saturation-and-error-rate-validation`:
+
+### Commit A -- BSGSD: parity port (`1756b37`)
+`bsgsd.cpp` had drifted ~12 features behind `keyhunt.cpp`.  This commit
+ports the missing features so calling out to BSGSD produces identical
+results to running keyhunt directly.
+
+- New flag `--bsgs-endo=off|keyhunt|glv12` -- 3-lane angrygiant +
+  `bsgs_secondcheck_endo` + `bsgs_thirdcheck_endo`, with identical
+  recovery semantics to keyhunt.
+- New flag `--honest-counter` -- emits `X-Steps` and per-lane
+  `X-Lane-N-{Probes,Hits,Recov}` HTTP headers so callers can audit
+  actual scalar coverage and bloom-filter dynamics separately.
+- New flag `--gpu-bloom` -- reserved for GPU bloom prefilter; flag
+  surface only in this commit, full hookup follows.
+- New flag `--public` -- convenience alias for `-i 0.0.0.0`.
+- `lambda` / `lambda2` / `beta` / `beta2` globals populated in `main()`
+  from the same hex constants `keyhunt.cpp` uses.
+- `OriginalPointsBSGS_endo[2]` (singular here -- BSGSD is one-target-
+  per-request, unlike keyhunt's vector) populated in `client_handler`
+  when `--bsgs-endo!=off`.
+- Per-lane diagnostic counters (probes/hits/recovers, all atomic)
+  matching keyhunt for cross-tool parity.
+- `bsgs_live_steps` / `bsgs_steps_total` atomics fed by 3 `fetch_add`
+  sites in the inner bucket loop, so the status path can report honest
+  keys/sec.
+
+**Honest finding (kept the wiring, but documented the truth):** on
+narrow puzzle ranges `--bsgs-endo` is **~2x SLOWER** than `off` because
+3 lanes do 3x probe work but the orbit images fall outside `[from,to]`
+so the extra work is pure overhead.  Only useful for whole-keyspace
+scans or kangaroo-style port.  See
+`research/BSGS_ENDOMORPHISM_WIRING_2026_04_24.md`.
+
+### Commit B -- BSGSD: bug fixes (`3a8866f`)
+Six BSGSD bugs that have been latent since earlier releases; new traffic
+from keyhunt callers + magic_wand fill jobs would have made any of them
+concrete.
+
+1. **Server-side single-flight mutex** (`single_search_mutex`).  Docs
+   always claimed "one client at a time" but the code did not enforce
+   it.  Two simultaneous `client_handler` threads would race on
+   `BSGS_CURRENT`, `n_range_start/end`, `OriginalPointsBSGS`,
+   `bsgs_found`, `BSGSkeyfound`, and the new endo lane counters.  Now
+   serialized -- a second client blocks until the first finishes.
+2. **Hostname binding via `getaddrinfo()`**.  Previously `-i fozzie`
+   (or any non-numeric IP) silently fell back to 0.0.0.0 because
+   `inet_pton()` only accepts IPv4 literals.  Now hostnames resolve
+   correctly; only truly unresolvable input falls back, with a clear
+   warning.
+3. **Banner accuracy**.  Now reports BOTH the user-supplied label AND
+   the resolved IP, e.g. `[+] Listening in fozzie (192.168.200.51):8080`,
+   so users can verify hostname resolution actually worked.
+4. **SIGINT / SIGTERM graceful shutdown**.  Adds `shutdown_signal_handler`
+   that flips a flag and `shutdown()`s the listening socket.  The
+   `accept()` loop now checks the flag and handles `EINTR` cleanly, so
+   Ctrl-C exits without leaving sockets dangling.
+5. **Misleading "Closing connection" log replaced**.  The old line
+   fired immediately after `pthread_create`, BEFORE the detached thread
+   actually finished its search; the connection was not closed at that
+   point.  Now logs `[+] Dispatched <ip>:<port> to worker thread` at
+   handoff time.
+6. **`BSGSD.md` docs corrected**.  Said default IP was 127.0.0.1; actual
+   default has been 0.0.0.0 since this branch.  Documents new flags
+   `--bsgs-endo`, `--honest-counter`, `--gpu-bloom`, `--public`, and the
+   single-flight serialization behavior.  File CRLF endings normalized
+   to LF.
+
+### Commit C -- libbsgsd_client.a + tests + Makefile target
+New shared client library `lib/bsgsd_client.{h,cpp}` usable by keyhunt,
+magic_wand, and any future tool that wants pool-aware BSGSD access.
+
+- TCP single-line and HTTP POST JSON transports with timeout-aware
+  connect/recv on top of POSIX sockets and `getaddrinfo`.
+- `Pool` class with round-robin and fan-out dispatch, per-host health
+  tracking, retry-on-failure.
+- HTTP response parser that extracts `X-Elapsed-Seconds`, `X-Steps`,
+  `X-BSGS-Endo`, `X-GPU-Bloom`, and per-lane diagnostic headers when
+  the daemon is started with `--honest-counter`.
+- New Makefile targets:
+  - `make libbsgsd_client.a` -- builds the static lib (pure C++17 +
+    POSIX sockets, no third-party deps).
+  - `make clean_lib` -- removes the static lib and intermediate `.o`s.
+
+## 2026-04-24 (earlier on this branch) -- bloom and counter fixes
+
+Pre-BSGSD work on the same branch (commits `b5458ee` and `d0e9a5d`,
+inherited as the working baseline for the BSGSD port):
+
+- **Fix bloom saturation handling** (`b5458ee`).
+  - Validate `--mapped-error` / `--bloom-bytes` arguments instead of
+    silently using bogus values.
+  - Fix the static-override bug where a previous override would leak
+    into a subsequent run.
+  - Add saturation warnings when the bloom load factor is high enough
+    to materially degrade the false-positive rate.
+- **Fix bloom k-mismatch causing ~1000x KPS regression on bloom load**
+  (`d0e9a5d`).  Previously a saved bloom file's `k` (number of hash
+  functions) could mismatch the run-time configuration, silently
+  producing the wrong probe pattern and tanking throughput.  Now
+  validated at load and rejected if mismatched.
+- **Wire GLV endomorphism into BSGS angrygiant + honest counter**
+  (`fb2362e`).  This commit landed earlier on the branch -- the BSGSD
+  parity port is the back-port of these features into bsgsd.cpp.
+
+## Inherited from earlier `naanprofit/keyhunt` branches
+
+These fixes were merged into this branch via prior PRs and are
+documented here for completeness so users upgrading from upstream
+alberto-bsd see the full picture:
+
+- **Bloom file creation and merging** (PRs #82 / #83, ea4ed4a / 4a2e396).
+  Worker shards reuse existing blooms when available; duplicate shards
+  are no longer created when reuse is requested.
+- **Bus error during data loading** (PR #81, edcb365).  Skip rebuild
+  when loading mapped blooms instead of touching their pages, which
+  caused SIGBUS on read-only mounts.
+- **Worker0 directory isolation** (PR #80, b1d2f68).  When multiple
+  workers run in parallel, worker0 now uses a dedicated directory so
+  it does not collide with the merged bloom output.
+- **Bus error during execution** (PR #79, a76a7b4).  Fix BSGS merge
+  sizing to use the correct entry count when the merged bloom spans
+  shards of different sizes.
+- **Worker output directory structure** (PRs #76, #77, #78).
+  - Allow bloom merge to fall back to worker metadata directories.
+  - Prevent nested mapped bloom paths for worker shards.
+  - Retry bloom merge with default shard names when a custom name was
+    set but the named shard was missing.
+- **Worker output directory paths** (PRs #73, #74).
+  - Add `--bsgs-build-only` for BSGS workers.
+  - Fix worker outdir override for sharded builds.
+- **Sharded merge tests + bloom merge sizing alignment** (PR #72,
+  c534a07).
+- **Sharded BSGS workflow documentation** (PR #71, f4e181e).
+- **BSGS merge merge pipeline + meta loader** (PR #70, 96173c9 /
+  8985120).  CLI flags and meta-file format for bloom merge.
+- **Worker slice handling and metadata** (PR #69, b7f34b5 / 045a1d9).
+- **Bloom shard IO scoped to worker outputs** (PR #68, 70c600d).
+- **Mapped bloom configuration improvements** (various, 67cf71e /
+  41bd34f / e685b24 / be9e034 / 7803af1 / a735c76 / 6fd35a9).
+  - Configurable mmap prefetch controls and IO logging.
+  - Clamp mapped chunk configuration.
+  - Improve mapped bloom placement and planning.
+  - Fix BSGS target loading.
+  - Add mapped bloom readonly option plumbing.
+  - Handle duplicate BSGS matches and add regression test.
+  - Fix BSGS binary search bounds.
+  - Protect existing ptables unless rebuild requested.
+  - Harden load-only ptable handling and CLI parsing.
+  - Make bsgsd bloom generation lock-free.
+  - Speed up bloom table generation.
+  - Fix BSGS stride for GGSB.
+
+---
+
+# Upstream (alberto-bsd) CHANGELOG
+
 # Version 0.2.230519 Satoshi Quest
 - Speed x2 in BSGS mode for main version
 
