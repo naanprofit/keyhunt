@@ -141,6 +141,12 @@ int64_t bsgs_partition(struct bsgs_xvalue *arr, int64_t n);
 int bsgs_searchbinary(struct bsgs_xvalue *arr,char *data,int64_t array_length,uint64_t *range_start,uint64_t *range_end);
 int bsgs_secondcheck(Int *start_range,uint32_t a,Int *privatekey);
 int bsgs_thirdcheck(Int *start_range,uint32_t a,Int *privatekey);
+int bsgs_secondcheck_endo(Int *start_range, uint32_t a,
+                          Point *target_override, int recover_lane,
+                          Int *privatekey);
+int bsgs_thirdcheck_endo(Int *start_range, uint32_t a,
+                         Point *target_override, int recover_lane,
+                         Int *privatekey);
 
 
 void writekey(bool compressed,Int *key);
@@ -388,6 +394,44 @@ BSGS Variables
 std::atomic<bool> bsgs_found{false};
 Point OriginalPointsBSGS;
 bool OriginalPointsBSGScompressed;
+/*
+ * Endomorphism-twisted target points, populated when --bsgs-endo!=off:
+ *   OriginalPointsBSGS_endo[0] = (lambda^-1) * OriginalPointsBSGS  (= beta^2 * X)
+ *   OriginalPointsBSGS_endo[1] = (lambda^-2) * OriginalPointsBSGS  (= beta   * X)
+ * Singular here (BSGSD is one-target-at-a-time, unlike keyhunt's vector).
+ * See keyhunt.cpp comment block for full recovery semantics.
+ */
+Point OriginalPointsBSGS_endo[2];
+
+/* Endomorphism state: lambda, lambda^2, beta, beta^2. Matches keyhunt. */
+Int lambda;
+Int lambda2;
+Int beta;
+Int beta2;
+int FLAGENDOMORPHISM = 0;
+#define BSGS_ENDO_OFF      0
+#define BSGS_ENDO_KEYHUNT  1
+#define BSGS_ENDO_GLV12    2
+int FLAGBSGSENDO = BSGS_ENDO_OFF;
+
+/* Live-tick step counter (matches keyhunt). Fed by 5 fetch_add sites in the
+ * BSGS thread so the status path can compute honest keys/sec. */
+std::atomic<uint64_t> bsgs_live_steps{0};
+std::atomic<uint64_t> bsgs_steps_total{0};
+
+/* Per-lane diagnostics. Identical layout to keyhunt for cross-tool parity. */
+std::atomic<uint64_t> bsgs_endo_lane_probes  [3] {{0},{0},{0}};
+std::atomic<uint64_t> bsgs_endo_lane_hits    [3] {{0},{0},{0}};
+std::atomic<uint64_t> bsgs_endo_lane_recovers[3] {{0},{0},{0}};
+
+/* Optional GPU bloom prefilter (mirrors keyhunt's --gpu-bloom). The actual
+ * gpu_bloom_* symbols are provided by gpu_bloom.cu when CUDA=1, otherwise
+ * by gpu_bloom_stub.c. */
+int FLAGGPUBLOOM = 0;
+
+/* Honest counter mode (matches keyhunt's --honest-counter). When set, the
+ * status path reports BOTH scalar coverage and bloom-lookups separately. */
+int FLAGHONESTCOUNTER = 0;
 
 uint64_t bytes;
 char checksum[32],checksum_backup[32];
@@ -734,6 +778,16 @@ int main(int argc, char **argv)	{
 	ZERO.SetInt32(0);
 	ONE.SetInt32(1);
 	BSGS_GROUP_SIZE.SetInt32(CPU_GRP_SIZE);
+
+	/* GLV/secp256k1 endomorphism constants -- match keyhunt.cpp exactly.
+	 * lambda is the order-3 root of unity in Fn (scalar field), beta is its
+	 * counterpart in Fp (coordinate field). Used by --bsgs-endo to twist
+	 * the target pubkey along two extra lanes for ~3x effective coverage on
+	 * whole-keyspace scans (NOT puzzle ranges -- see research bench). */
+	lambda.SetBase16((char*)"5363ad4cc05c30e0a5261c028812645a122e22ea20816678df02967c1b23bd72");
+	lambda2.SetBase16((char*)"ac9c52b33fa3cf1f5ad9e3fd77ed9ba4a880b9fc8ec739c2e0cfc810b51283ce");
+	beta.SetBase16((char*)"7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee");
+	beta2.SetBase16((char*)"851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40");
 	unsigned long rseedvalue;
 #if defined(__linux__)
 	int bytes_read = getrandom(&rseedvalue, sizeof(unsigned long), GRND_NONBLOCK);
@@ -794,6 +848,10 @@ int main(int argc, char **argv)	{
                 {"bsgs-block-size", required_argument, 0, 0},
                 {"rmd-batch-size", required_argument, 0, 0},
                 {"ptable-cache", no_argument, 0, 0},
+                {"bsgs-endo", required_argument, 0, 0},
+                {"gpu-bloom", no_argument, 0, 0},
+                {"honest-counter", no_argument, 0, 0},
+                {"public", no_argument, 0, 0},
                 {0, 0, 0, 0}
         };
 
@@ -899,6 +957,30 @@ int main(int argc, char **argv)	{
                                         // unused
                                 } else if(strcmp(long_options[option_index].name, "ptable-cache") == 0){
                                         FLAGPTABLECACHE = 1;
+                                } else if(strcmp(long_options[option_index].name, "bsgs-endo") == 0){
+                                        if(strcmp(optarg, "off") == 0){
+                                                FLAGBSGSENDO = BSGS_ENDO_OFF;
+                                                FLAGENDOMORPHISM = 0;
+                                        } else if(strcmp(optarg, "keyhunt") == 0){
+                                                FLAGBSGSENDO = BSGS_ENDO_KEYHUNT;
+                                                FLAGENDOMORPHISM = 1;
+                                        } else if(strcmp(optarg, "glv12") == 0){
+                                                FLAGBSGSENDO = BSGS_ENDO_GLV12;
+                                                FLAGENDOMORPHISM = 1;
+                                        } else {
+                                                fprintf(stderr,"[E] --bsgs-endo: unknown mode '%s' (expected off|keyhunt|glv12)\n", optarg);
+                                                exit(EXIT_FAILURE);
+                                        }
+                                } else if(strcmp(long_options[option_index].name, "gpu-bloom") == 0){
+                                        FLAGGPUBLOOM = 1;
+                                } else if(strcmp(long_options[option_index].name, "honest-counter") == 0){
+                                        FLAGHONESTCOUNTER = 1;
+                                } else if(strcmp(long_options[option_index].name, "public") == 0){
+                                        /* Convenience alias for -i 0.0.0.0. Sets IP only if not
+                                         * already user-specified. */
+                                        if(IP == NULL || IP == ip_default){
+                                                IP = (char*)ip_default;
+                                        }
                                 }
                         break;
                         case '6':
@@ -2539,10 +2621,20 @@ void *thread_process_bsgs(void *vargp)	{
         Int km,intaux;
         Point pp;
         Point pn;
-        unsigned char giant_xpoints[CPU_GRP_SIZE][BSGS_BUFFERXPOINTLENGTH];
-        uint8_t giant_first_byte[CPU_GRP_SIZE];
-        uint32_t giant_bucket_positions[CPU_GRP_SIZE];
-        uint32_t giant_bucket_offsets[257];
+        /* 3-lane angrygiant scratch.
+         *   Lane 0: identity orbit          (always runs)
+         *   Lane 1: beta * pts[i].x  orbit   (runs when --bsgs-endo!=off)
+         *   Lane 2: beta2 * pts[i].x orbit   (runs when --bsgs-endo!=off)
+         * Each lane gets its own xpoint buffer, first-byte cache, bucket
+         * sort scratch, and bucket count/offset arrays so we can replay
+         * the same bloom_check + secondcheck pipeline against each twisted
+         * target.  Memory cost: ~3x the original ~25KB scratch (~75KB).
+         */
+        const int n_lanes = (FLAGBSGSENDO != BSGS_ENDO_OFF) ? 3 : 1;
+        unsigned char giant_xpoints[3][CPU_GRP_SIZE][BSGS_BUFFERXPOINTLENGTH];
+        uint8_t giant_first_byte[3][CPU_GRP_SIZE];
+        uint32_t giant_bucket_positions[3][CPU_GRP_SIZE];
+        uint32_t giant_bucket_offsets[3][257];
         bool angry_giant = (FLAGBSGSMODE == BSGS_MODE_ANGRY_GIANT);
         grp->Set(dx);
 	
@@ -2712,93 +2804,128 @@ pn.y.ModAdd(&GSn[i].y);
 #endif
 
 				pts[0] = pn;
-				
-                                uint32_t bucket_counts[256] = {0};
-                                uint32_t bucket_sizes[256];
 
-                                for(int i = 0; i < CPU_GRP_SIZE; i++) {
-                                        pts[i].x.Get32Bytes(giant_xpoints[i]);
-                                        uint8_t bucket = giant_xpoints[i][0];
-                                        giant_first_byte[i] = bucket;
-                                        bucket_counts[bucket]++;
-                                }
+				uint32_t bucket_counts[3][256] = {{0}};
+				uint32_t bucket_sizes[3][256];
 
-                                giant_bucket_offsets[0] = 0;
-                                for(int bucket = 0; bucket < 256; bucket++) {
-                                        giant_bucket_offsets[bucket + 1] = giant_bucket_offsets[bucket] + bucket_counts[bucket];
-                                        bucket_sizes[bucket] = bucket_counts[bucket];
-                                }
+				/* Lane 0 always; lanes 1/2 only when --bsgs-endo!=off. */
+				for(int i = 0; i < CPU_GRP_SIZE; i++) {
+					/* lane 0: identity orbit */
+					pts[i].x.Get32Bytes(giant_xpoints[0][i]);
+					giant_first_byte[0][i] = giant_xpoints[0][i][0];
+					bucket_counts[0][giant_first_byte[0][i]]++;
 
-                                for(int bucket = 0; bucket < 256; bucket++) {
-                                        bucket_counts[bucket] = 0;
-                                }
+					if(n_lanes >= 2) {
+						/* lane 1: beta * pts[i].x  (lambda orbit X) */
+						Int bx; bx.ModMulK1(&pts[i].x, &beta);
+						bx.Get32Bytes(giant_xpoints[1][i]);
+						giant_first_byte[1][i] = giant_xpoints[1][i][0];
+						bucket_counts[1][giant_first_byte[1][i]]++;
 
-                                for(int i = 0; i < CPU_GRP_SIZE; i++) {
-                                        uint8_t bucket = giant_first_byte[i];
-                                        uint32_t pos = giant_bucket_offsets[bucket] + bucket_counts[bucket]++;
-                                        giant_bucket_positions[pos] = i;
-                                }
+						/* lane 2: beta2 * pts[i].x  (lambda^2 orbit X) */
+						Int b2x; b2x.ModMulK1(&pts[i].x, &beta2);
+						b2x.Get32Bytes(giant_xpoints[2][i]);
+						giant_first_byte[2][i] = giant_xpoints[2][i][0];
+						bucket_counts[2][giant_first_byte[2][i]]++;
+					}
+				}
 
-                                uint8_t bucket_order[256];
-                                for(int bucket = 0; bucket < 256; bucket++) {
-                                        bucket_order[bucket] = (uint8_t)bucket;
-                                }
-
-                                if(angry_giant) {
-                                        for(int i = 0; i < 255; i++) {
-                                                for(int j = i + 1; j < 256; j++) {
-                                                        if(bucket_sizes[bucket_order[j]] > bucket_sizes[bucket_order[i]]) {
-                                                                uint8_t tmp = bucket_order[i];
-                                                                bucket_order[i] = bucket_order[j];
-                                                                bucket_order[j] = tmp;
-                                                        }
-                                                }
-                                        }
-                                } else {
-                                        (void)bucket_sizes;
-                                }
-
-                                for(int order_index = 0; order_index < 256 && !bsgs_found.load(std::memory_order_relaxed); order_index++) {
-                                        uint8_t bucket = bucket_order[order_index];
-                                        uint32_t start = giant_bucket_offsets[bucket];
-                                        uint32_t end = giant_bucket_offsets[bucket + 1];
-
-					if(start == end) {
-						continue;
+				/* Per-lane bucket sort + bloom probe. Lane recovery:
+				 *   L=0: identity; recovered scalar is the user key.
+				 *   L=1: beta orbit; refine vs lambda^-1*Q, multiply
+				 *        recovered scalar by lambda for user key.
+				 *   L=2: beta2 orbit; refine vs lambda^-2*Q, multiply
+				 *        recovered scalar by lambda^2 for user key.
+				 * (Lane mapping is handled inside bsgs_thirdcheck_endo.)
+				 */
+				for(int L = 0; L < n_lanes && !bsgs_found.load(std::memory_order_relaxed); L++) {
+					giant_bucket_offsets[L][0] = 0;
+					for(int bucket = 0; bucket < 256; bucket++) {
+						giant_bucket_offsets[L][bucket + 1] = giant_bucket_offsets[L][bucket] + bucket_counts[L][bucket];
+						bucket_sizes[L][bucket] = bucket_counts[L][bucket];
+						bucket_counts[L][bucket] = 0;
 					}
 
-					struct bloom *primary = &bloom_bP[bucket];
+					for(int i = 0; i < CPU_GRP_SIZE; i++) {
+						uint8_t bucket = giant_first_byte[L][i];
+						uint32_t pos = giant_bucket_offsets[L][bucket] + bucket_counts[L][bucket]++;
+						giant_bucket_positions[L][pos] = i;
+					}
 
-					for(uint32_t pos = start; pos < end && !bsgs_found.load(std::memory_order_relaxed); pos++) {
-						int i = (int)giant_bucket_positions[pos];
+					uint8_t bucket_order[256];
+					for(int bucket = 0; bucket < 256; bucket++) {
+						bucket_order[bucket] = (uint8_t)bucket;
+					}
 
-						if(!bloom_check(primary,(char*)giant_xpoints[i],BSGS_BUFFERXPOINTLENGTH)) {
+					if(angry_giant) {
+						for(int i = 0; i < 255; i++) {
+							for(int j2 = i + 1; j2 < 256; j2++) {
+								if(bucket_sizes[L][bucket_order[j2]] > bucket_sizes[L][bucket_order[i]]) {
+									uint8_t tmp = bucket_order[i];
+									bucket_order[i] = bucket_order[j2];
+									bucket_order[j2] = tmp;
+								}
+							}
+						}
+					} else {
+						(void)bucket_sizes;
+					}
+
+					for(int order_index = 0; order_index < 256 && !bsgs_found.load(std::memory_order_relaxed); order_index++) {
+						uint8_t bucket = bucket_order[order_index];
+						uint32_t start = giant_bucket_offsets[L][bucket];
+						uint32_t end = giant_bucket_offsets[L][bucket + 1];
+
+						if(start == end) {
 							continue;
 						}
 
-						r = bsgs_secondcheck(&base_key,((j*CPU_GRP_SIZE) + i),&keyfound);
-						if(r)	{
-							hextemp = keyfound.GetBase16();
-                                                        printf("[+] Thread Key found privkey %s\n",hextemp);
-							point_found = secp->ComputePublicKey(&keyfound);
-							aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed,point_found);
-							printf("[+] Publickey %s\n",aux_c);
-							pthread_mutex_lock(&write_keys);
+						struct bloom *primary = &bloom_bP[bucket];
 
-							filekey = fopen("KEYFOUNDKEYFOUND.txt","a");
-							if(filekey != NULL)	{
-								fprintf(filekey,"Key found privkey %s\nPublickey %s\n",hextemp,aux_c);
-								fclose(filekey);
+						for(uint32_t pos = start; pos < end && !bsgs_found.load(std::memory_order_relaxed); pos++) {
+							int i = (int)giant_bucket_positions[L][pos];
+
+							bsgs_endo_lane_probes[L].fetch_add(1, std::memory_order_relaxed);
+							bsgs_live_steps.fetch_add(1, std::memory_order_relaxed);
+							bsgs_steps_total.fetch_add(1, std::memory_order_relaxed);
+
+							if(!bloom_check(primary,(char*)giant_xpoints[L][i],BSGS_BUFFERXPOINTLENGTH)) {
+								continue;
 							}
-							BSGSkeyfound.Set(&keyfound);
-							pthread_mutex_unlock(&write_keys);
-							free(hextemp);
-							free(aux_c);
-							bsgs_found.store(true, std::memory_order_relaxed);
+							bsgs_endo_lane_hits[L].fetch_add(1, std::memory_order_relaxed);
 
+							if(L == 0) {
+								r = bsgs_secondcheck(&base_key,((j*CPU_GRP_SIZE) + i),&keyfound);
+							} else {
+								Point *twisted_target = &OriginalPointsBSGS_endo[L - 1];
+								r = bsgs_secondcheck_endo(&base_key,
+								                          ((j*CPU_GRP_SIZE) + i),
+								                          twisted_target, L,
+								                          &keyfound);
+							}
+							if(r) {
+								bsgs_endo_lane_recovers[L].fetch_add(1, std::memory_order_relaxed);
+								hextemp = keyfound.GetBase16();
+								printf("[+] Thread Key found privkey %s (lane %d)\n",hextemp, L);
+								point_found = secp->ComputePublicKey(&keyfound);
+								aux_c = secp->GetPublicKeyHex(OriginalPointsBSGScompressed,point_found);
+								printf("[+] Publickey %s\n",aux_c);
+								pthread_mutex_lock(&write_keys);
+
+								filekey = fopen("KEYFOUNDKEYFOUND.txt","a");
+								if(filekey != NULL)	{
+									fprintf(filekey,"Key found privkey %s\nPublickey %s\n",hextemp,aux_c);
+									fclose(filekey);
+								}
+								BSGSkeyfound.Set(&keyfound);
+								pthread_mutex_unlock(&write_keys);
+								free(hextemp);
+								free(aux_c);
+								bsgs_found.store(true, std::memory_order_relaxed);
+							}
 						}
 					}
-				}
+				} /* per-lane loop */
 				// Next start point (startP += (bsSize*GRP_SIZE).G)
 				
 				pp = startP;
@@ -2933,6 +3060,158 @@ int bsgs_thirdcheck(Int *start_range,uint32_t a,Int *privatekey)	{
 		i++;
 	}while(i < 32 && !found);
 
+	return found;
+}
+
+/*
+ * Endomorphism-aware second/third checks (single-target BSGSD variant).
+ *
+ *   target_override : pointer to the (twisted) target point used to derive
+ *                     BSGS_S = target - base_key for this lane.
+ *   recover_lane    : 0 = identity (no remap), 1 = lambda . k_cand,
+ *                     2 = lambda^2 . k_cand. Recovery happens in
+ *                     thirdcheck_endo before validating against the
+ *                     ORIGINAL untwisted target.
+ *
+ * After recovery, the candidate scalar is validated by recomputing the
+ * pubkey and comparing to OriginalPointsBSGS (singular here -- BSGSD has
+ * one target per request, unlike keyhunt's vector). This guarantees the
+ * privkey we report is the actual key for the user-supplied pubkey.
+ */
+int bsgs_thirdcheck_endo(Int *start_range, uint32_t a,
+                         Point *target_override, int recover_lane,
+                         Int *privatekey);
+
+int bsgs_secondcheck_endo(Int *start_range, uint32_t a,
+                          Point *target_override, int recover_lane,
+                          Int *privatekey)
+{
+	int i = 0, found = 0, r = 0;
+	Int base_key;
+	Point base_point, point_aux;
+	Point BSGS_Q, BSGS_S, BSGS_Q_AMP;
+	char xpoint_raw[32];
+
+	base_key.Set(&BSGS_M_double);
+	base_key.Mult((uint64_t) a);
+	base_key.Add(start_range);
+
+	base_point = secp->ComputePublicKey(&base_key);
+	point_aux  = secp->Negation(base_point);
+
+	BSGS_S = secp->AddDirect(*target_override, point_aux);
+	BSGS_Q.Set(BSGS_S);
+	do {
+		BSGS_Q_AMP = secp->AddDirect(BSGS_Q, BSGS_AMP2[i]);
+		BSGS_S.Set(BSGS_Q_AMP);
+		BSGS_S.x.Get32Bytes((unsigned char *) xpoint_raw);
+		r = bloom_check(&bloom_bPx2nd[(uint8_t) xpoint_raw[0]], xpoint_raw, 32);
+		if (r) {
+			found = bsgs_thirdcheck_endo(&base_key, i,
+			                             target_override, recover_lane,
+			                             privatekey);
+		}
+		i++;
+	} while (i < 32 && !found);
+	return found;
+}
+
+int bsgs_thirdcheck_endo(Int *start_range, uint32_t a,
+                         Point *target_override, int recover_lane,
+                         Int *privatekey)
+{
+	uint64_t j_start = 0, j_end = 0;
+	int i = 0, found = 0, r = 0;
+	Int base_key, calculatedkey;
+	Point base_point, point_aux;
+	Point BSGS_Q, BSGS_S, BSGS_Q_AMP;
+	char xpoint_raw[32];
+
+	base_key.SetInt32(a);
+	base_key.Mult(&BSGS_M2_double);
+	base_key.Add(start_range);
+
+	base_point = secp->ComputePublicKey(&base_key);
+	point_aux  = secp->Negation(base_point);
+
+	BSGS_S = secp->AddDirect(*target_override, point_aux);
+	BSGS_Q.Set(BSGS_S);
+
+	do {
+		BSGS_Q_AMP = secp->AddDirect(BSGS_Q, BSGS_AMP3[i]);
+		BSGS_S.Set(BSGS_Q_AMP);
+		BSGS_S.x.Get32Bytes((unsigned char *) xpoint_raw);
+		r = bloom_check(&bloom_bPx3rd[(uint8_t) xpoint_raw[0]], xpoint_raw, 32);
+		if (r) {
+			r = bsgs_searchbinary(bPtable, xpoint_raw, bsgs_m3, &j_start, &j_end);
+			if (r) {
+				for (uint64_t j = j_start; j <= j_end && !found; j++) {
+					Int k_cand;
+					/* + branch */
+					calcualteindex(i, &calculatedkey);
+					k_cand.Set(&calculatedkey);
+					k_cand.Add((uint64_t)(j + 1));
+					k_cand.Add(&base_key);
+					Int k_real;
+					k_real.Set(&k_cand);
+					if (recover_lane == 1) {
+						k_real.Mult(&lambda);
+						k_real.Mod(&secp->order);
+					} else if (recover_lane == 2) {
+						k_real.Mult(&lambda2);
+						k_real.Mod(&secp->order);
+					}
+					point_aux = secp->ComputePublicKey(&k_real);
+					if (point_aux.x.IsEqual(&OriginalPointsBSGS.x)) {
+						privatekey->Set(&k_real);
+						found = 1;
+						break;
+					}
+					/* - branch */
+					calcualteindex(i, &calculatedkey);
+					k_cand.Set(&calculatedkey);
+					k_cand.Sub((uint64_t)(j + 1));
+					k_cand.Add(&base_key);
+					k_real.Set(&k_cand);
+					if (recover_lane == 1) {
+						k_real.Mult(&lambda);
+						k_real.Mod(&secp->order);
+					} else if (recover_lane == 2) {
+						k_real.Mult(&lambda2);
+						k_real.Mod(&secp->order);
+					}
+					point_aux = secp->ComputePublicKey(&k_real);
+					if (point_aux.x.IsEqual(&OriginalPointsBSGS.x)) {
+						privatekey->Set(&k_real);
+						found = 1;
+					}
+				}
+			}
+		} else {
+			/* JLP edge case: same x => exact negation of AMP3[i]. */
+			if (BSGS_Q.x.IsEqual(&BSGS_AMP3[i].x)) {
+				Int k_cand;
+				calcualteindex(i, &calculatedkey);
+				k_cand.Set(&calculatedkey);
+				k_cand.Add(&base_key);
+				Int k_real;
+				k_real.Set(&k_cand);
+				if (recover_lane == 1) {
+					k_real.Mult(&lambda);
+					k_real.Mod(&secp->order);
+				} else if (recover_lane == 2) {
+					k_real.Mult(&lambda2);
+					k_real.Mod(&secp->order);
+				}
+				point_aux = secp->ComputePublicKey(&k_real);
+				if (point_aux.x.IsEqual(&OriginalPointsBSGS.x)) {
+					privatekey->Set(&k_real);
+					found = 1;
+				}
+			}
+		}
+		i++;
+	} while (i < 32 && !found);
 	return found;
 }
 
@@ -3541,7 +3820,29 @@ void* client_handler(void* arg) {
 	n_range_start.SetBase16(n_start_buf.data());
 	n_range_end.SetBase16(n_end_buf.data());
 	BSGS_CURRENT.Set(&n_range_start);
-	
+
+	/* Build endomorphism-twisted target points for the BSGS endo lanes.
+	 * Recovery semantics:
+	 *   - Lane 0 (untwisted) recovers k as-is.
+	 *   - Lane 1 (Qinv1 = beta2 . Q.x) recovers k_lane1; user-key = lambda . k_lane1
+	 *   - Lane 2 (Qinv2 = beta  . Q.x) recovers k_lane2; user-key = lambda^2 . k_lane2
+	 * client_handler reverses the lane mapping before reporting found key. */
+	if(FLAGBSGSENDO != BSGS_ENDO_OFF){
+		OriginalPointsBSGS_endo[0] = OriginalPointsBSGS;
+		OriginalPointsBSGS_endo[0].x.ModMulK1(&beta2);   /* lambda^-1 . Q */
+		OriginalPointsBSGS_endo[1] = OriginalPointsBSGS;
+		OriginalPointsBSGS_endo[1].x.ModMulK1(&beta);    /* lambda^-2 . Q */
+	}
+
+	/* Reset per-request lane diagnostics. */
+	for(int L=0; L<3; L++){
+		bsgs_endo_lane_probes[L].store(0);
+		bsgs_endo_lane_hits[L].store(0);
+		bsgs_endo_lane_recovers[L].store(0);
+	}
+	bsgs_live_steps.store(0);
+	bsgs_steps_total.store(0);
+
 	bool *threads_created;
 	pthread_t *threads;
 	int *thread_args;
@@ -3599,8 +3900,49 @@ void* client_handler(void* arg) {
 			body = "404 Not Found\n";
 			status_line = "HTTP/1.1 404 Not Found\r\n";
 		}
-                char header[256];
-                int hlen = snprintf(header,sizeof(header),"%sContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\nX-Elapsed-Seconds: %.3f\r\n\r\n",status_line,body.size(),elapsed_seconds);
+                /* HTTP response headers. When --honest-counter is set we emit
+                 * additional X-* diagnostic headers so callers can audit the
+                 * actual scalar coverage and bloom-filter dynamics:
+                 *   X-Steps         total CPU bucket-bloom probe count
+                 *   X-Lane-N-Probes per-lane probe count (N=0,1,2)
+                 *   X-Lane-N-Hits   per-lane bloom-hit count
+                 *   X-Lane-N-Recov  per-lane successful key recoveries
+                 *   X-BSGS-Endo     mode label (off|keyhunt|glv12)
+                 *   X-GPU-Bloom     0 or 1
+                 */
+                char header[1024];
+                int hlen;
+                if(FLAGHONESTCOUNTER) {
+                        const char *endo_label = "off";
+                        if(FLAGBSGSENDO == BSGS_ENDO_KEYHUNT) endo_label = "keyhunt";
+                        else if(FLAGBSGSENDO == BSGS_ENDO_GLV12) endo_label = "glv12";
+                        hlen = snprintf(header,sizeof(header),
+                                "%sContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n"
+                                "X-Elapsed-Seconds: %.3f\r\n"
+                                "X-Steps: %llu\r\n"
+                                "X-BSGS-Endo: %s\r\n"
+                                "X-GPU-Bloom: %d\r\n"
+                                "X-Lane-0-Probes: %llu\r\nX-Lane-0-Hits: %llu\r\nX-Lane-0-Recov: %llu\r\n"
+                                "X-Lane-1-Probes: %llu\r\nX-Lane-1-Hits: %llu\r\nX-Lane-1-Recov: %llu\r\n"
+                                "X-Lane-2-Probes: %llu\r\nX-Lane-2-Hits: %llu\r\nX-Lane-2-Recov: %llu\r\n"
+                                "\r\n",
+                                status_line, body.size(), elapsed_seconds,
+                                (unsigned long long)bsgs_steps_total.load(),
+                                endo_label, FLAGGPUBLOOM,
+                                (unsigned long long)bsgs_endo_lane_probes[0].load(),
+                                (unsigned long long)bsgs_endo_lane_hits[0].load(),
+                                (unsigned long long)bsgs_endo_lane_recovers[0].load(),
+                                (unsigned long long)bsgs_endo_lane_probes[1].load(),
+                                (unsigned long long)bsgs_endo_lane_hits[1].load(),
+                                (unsigned long long)bsgs_endo_lane_recovers[1].load(),
+                                (unsigned long long)bsgs_endo_lane_probes[2].load(),
+                                (unsigned long long)bsgs_endo_lane_hits[2].load(),
+                                (unsigned long long)bsgs_endo_lane_recovers[2].load());
+                } else {
+                        hlen = snprintf(header,sizeof(header),
+                                "%sContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\nX-Elapsed-Seconds: %.3f\r\n\r\n",
+                                status_line,body.size(),elapsed_seconds);
+                }
 		std::string response(header, hlen);
 		response += body;
 		if(!safe_send(client_fd, response.c_str(), response.size())) {
