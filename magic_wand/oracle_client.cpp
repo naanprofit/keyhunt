@@ -159,6 +159,46 @@ ProbeResult OracleClient::lookup_fp127f(const FP127 &fp) { return get_one(ctx_, 
 ProbeResult OracleClient::lookup_fp127b(const FP127 &fp) { return get_one(ctx_, fp127b_key(fp)); }
 ProbeResult OracleClient::lookup_fpcombo127(const FP127 &fp) { return get_one(ctx_, fpcombo127_key(fp)); }
 ProbeResult OracleClient::lookup_xset(XSet64 x) { return get_one(ctx_, xset_key(x)); }
+ProbeResult OracleClient::lookup_raw(const std::string &key) { return get_one(ctx_, key); }
+
+bool OracleClient::batch_insert_raw(
+    const std::vector<std::pair<std::string, uint64_t>> &kv_to_value) {
+    if (!ctx_) return false;
+    if (kv_to_value.empty()) return true;
+
+    const size_t CHUNK = 1024;
+    for (size_t off = 0; off < kv_to_value.size(); off += CHUNK) {
+        size_t n = std::min(CHUNK, kv_to_value.size() - off);
+        std::vector<std::string> args;
+        std::vector<const char *> argv;
+        std::vector<size_t> argvlen;
+        args.reserve(n * 2 + 1);
+        argv.reserve(n * 2 + 1);
+        argvlen.reserve(n * 2 + 1);
+
+        args.emplace_back("MSET");
+        argv.push_back(args.back().c_str());
+        argvlen.push_back(args.back().size());
+
+        for (size_t i = 0; i < n; i++) {
+            const auto &p = kv_to_value[off + i];
+            args.emplace_back(p.first);
+            argv.push_back(args.back().c_str());
+            argvlen.push_back(args.back().size());
+            args.emplace_back(encode_k_le(p.second));
+            argv.push_back(args.back().c_str());
+            argvlen.push_back(args.back().size());
+        }
+        redisReply *r = (redisReply *)redisCommandArgv(
+            ctx_, (int)argv.size(), argv.data(), argvlen.data());
+        if (!r || r->type == REDIS_REPLY_ERROR) {
+            if (r) freeReplyObject(r);
+            return false;
+        }
+        freeReplyObject(r);
+    }
+    return true;
+}
 
 ProbeResult OracleClient::triple_lookup(const FP127 &fp_fwd, const FP127 &fp_bwd, XSet64 x) {
     /* Pipeline three GETs in one round trip. */

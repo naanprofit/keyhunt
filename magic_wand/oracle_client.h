@@ -94,6 +94,11 @@ public:
     bool        ack_fill(const std::string &worker_id, const std::string &fill_id);
     bool        publish_fill_done(uint64_t k_lo, uint64_t k_hi);
 
+    /* Generic raw access for rainbow / non-fp namespaces. */
+    ProbeResult lookup_raw(const std::string &key);
+    bool        batch_insert_raw(
+        const std::vector<std::pair<std::string, uint64_t>> &kv_to_value);
+
     /* Diagnostics. */
     uint64_t db_size();      /* DBSIZE */
     bool     ping();
